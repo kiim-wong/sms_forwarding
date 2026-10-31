@@ -2,18 +2,6 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-> 本项目基于 [chenxuuu/sms_forwarding](https://github.com/chenxuuu/sms_forwarding) 改进，遵循 MIT 许可证，详见 [LICENSE](LICENSE)。  
-> 本项目**仅用于接收短信**与进行保号相关功能。  
-> 多卡控制、通话、拨号、开放接口、自动化等功能，不会考虑支持，请勿提出相关需求。
-
-[原项目后台页面演示](https://sms.j2.cx/)
-
-本项目旨在使用低成本的硬件设备，实现短信的自动转发功能，支持多种推送方式同时启用。
-
-> 原项目视频教程：[B站视频](https://www.bilibili.com/video/BV1cSmABYEiX)
-
-<img src="assets/photo.png" width="200" />
-
 ## 功能
 
 - 支持使用通用AT指令与模块进行通信
@@ -161,72 +149,78 @@ Web 后台“选网配置”页面支持：
 
 ## 界面预览
 
-|状态信息|主动ping|
-|-|-|
-|![](assets/status.png)|![](assets/ping.png)|
+| 系统设置 | 短信记录 |
+|---|---|
+| ![](assets/status.png) | ![](assets/history.png) |
 
-## 硬件搭配
+| 推送通道 | 网络测试 |
+|---|---|
+| ![](assets/push.png) | ![](assets/network.png) |
 
-若没有焊接能力，希望直接使用成品，可选直接购以下套件（我看过了，和自己做的成本一样）  
-支持**移动/联通/电信卡**：
+## 实测设备
 
-- [小蓝鲸WIFI短信宝](https://item.taobao.com/item.htm?id=1003711355912)（找客服问）
-- [4G FPC天线](https://item.taobao.com/item.htm?id=1003711355912&skuId=6162872574943)，与开发板同购
+本项目在以下真机上开发和验证：
 
-如果希望自行焊接硬件，参考下面的硬件搭配，总成本约¥27.8（会有浮动，可按实际自行组合搭配）  
-仅支持**移动/联通卡**：
+| 项目 | 参数 |
+|---|---|
+| MCU | ESP32-C3 QFN32，revision v0.4 |
+| Flash | XMC 4 MB |
+| 4G 模组 | ML307A-DSLN-MTSH1S00（CMCC） |
+| SIM | Nano SIM，实测中国联通 |
+| 烧录/调试口 | ESP32-C3 USB-Serial/JTAG |
+| 供电 | USB 5V |
+| 天线 | 4G FPC 天线 |
 
-- ESP32C3开发板，实测选用[ESP32C3 Super Mini](https://item.taobao.com/item.htm?id=852057780489&skuId=5813710390565)，¥9.5包邮
-- ML307R-DC开发板，实测选用[小蓝鲸ML307R-DC核心板](https://item.taobao.com/item.htm?id=797466121802&skuId=5722077108045)，¥16.3包邮
-- [4G FPC天线](https://item.taobao.com/item.htm?id=797466121802&skuId=5722077108045)，¥2，与核心板同购
+ML307A-DSLN 运行原厂 AT 固件，ESP32-C3 通过 115200 波特率的 UART 与它通信。实测外壳只有一个可用的 SIM 卡槽；本固件不实现双卡切换。
 
+其他 ESP32-C3 + ML307A 板卡只要引出相同的 UART 和模组 EN 引脚，理论上也可以使用，但未做实测。
 
 ## 硬件连接
 
-ESP32C3 与 ML307R-DC 通过串口（UART）连接，接线如下：
+实测设备是 ESP32-C3 + ML307A 一体化板卡，不需要外部接线。自行搭建时按以下方式连接：
 
-```
+```text
 ┌───────────────────────────────────────────────┐
 |                                               |
-|   ESP32C3 Super Mini      ML307R-DC核心板     |
+|   ESP32-C3                ML307A 模组         |
 | ┌───────────────────┐    ┌─────────────────┐ |
 └─┼─ GPIO5 (MODEM_EN) │    │                 │ |
   │       GPIO3 (TX) ─┼───►│ RX              │ |
   │                   │    │             EN ─┼─┘
-  │       GPIO4 (RX) ◄┼────┤ TX              │ 
-  │                   │    │                 │ 
-  │              GND ─┼────┤ GND             │ 
-  │                   │    │                 │ 
-  │               5V ─┼────┤ VCC (5V)        |
+  │       GPIO4 (RX) ◄┼────┤ TX              │
+  │                   │    │                 │
+  │              GND ─┼────┤ GND             │
+  │                   │    │                 │
+  │               5V ─┼────┤ VCC (5V)        │
   │                   │    │                 │
   └───────────────────┘    └─────────────────┘
                            │                 │
-                           │  SIM卡槽        │
-                           │  (插入Nano SIM) │
+                           │  SIM 卡槽       │
+                           │  (Nano SIM)     │
                            │                 │
                            │  天线接口       │
-                           │  (连接4G天线)   │
+                           │  (4G 天线)      │
                            └─────────────────┘
 ```
 
-可通过USB连接ESP32C3进行编程和供电，正常工作时，可通过网页与模组进行AT通信，方便调试。
+可通过 USB 连接 ESP32-C3 进行编程和供电。正常工作时，也可以通过网页向模组发送 AT 指令，方便调试。
 
 ## 软件组成
 
-- ESP32C3运行自己的`Arduino`固件，负责连接WiFi、通过 UART 接收 ML307R/ML307A 发送过来的短信数据，然后按配置选择 WiFi 或 4G 数据推送到 HTTP 接口或通知平台，并写入本地短信记录
-- ML307R-DC运行默认的AT固件，不用动
+- ESP32-C3 运行 `code/` 下的 Arduino 固件，负责连接 WiFi、通过 UART 接收 ML307A 上报的短信，按配置选择 WiFi 或 4G 数据推送到通知平台，并写入本地短信记录。
+- ML307A-DSLN 运行原厂 AT 固件，不需要改动。
 
-需要在`Arduino IDE`中单独安装这些库：
+需要在 Arduino IDE 中单独安装：
 
-- **pdulib** by David Henry
+- **pdulib** by David Henry，版本 `0.5.11`（PDU 短信编解码）
 
-需要在`Arduino IDE`中安装ESP32开发板支持，参考[官方文档](https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html)，版型选`MakerGO ESP32 C3 SuperMini`。
+ESP32 开发板支持包参考[官方文档](https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html)。请选择与实际硬件匹配的 ESP32-C3 板型；实测设备使用通用 ESP32-C3，DIY 也可以使用 MakerGO ESP32 C3 SuperMini。
 
 ## 编译与烧录
 
 1. 在 Arduino IDE 中安装 ESP32 开发板支持包和 `pdulib` 库。
 2. 打开 `code/code.ino`。
-3. 选择 `MakerGO ESP32 C3 SuperMini` 开发板和正确的串口。
+3. 选择与实际硬件匹配的 ESP32-C3 开发板和正确的串口。
 4. 编译并上传。
 
 使用 `arduino-cli` 时，可参考以下命令：
@@ -234,8 +228,8 @@ ESP32C3 与 ML307R-DC 通过串口（UART）连接，接线如下：
 ```bash
 arduino-cli core install esp32:esp32
 arduino-cli lib install "pdulib@0.5.11"
-arduino-cli compile --fqbn esp32:esp32:makergo_c3_supermini code
-arduino-cli upload --fqbn esp32:esp32:makergo_c3_supermini --port /dev/ttyUSB0 code
+arduino-cli compile --fqbn esp32:esp32:esp32c3 code
+arduino-cli upload --fqbn esp32:esp32:esp32c3 --port /dev/ttyUSB0 code
 ```
 
 Windows 下请把 `/dev/ttyUSB0` 换成设备管理器显示的 COM 口。

@@ -2,14 +2,6 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-> This project is an enhanced version of [chenxuuu/sms_forwarding](https://github.com/chenxuuu/sms_forwarding), released under the MIT License. See [LICENSE](LICENSE).
->
-> **Scope:** this project is intended for receiving SMS messages and keeping SIM cards active. Multi-SIM control, voice calls, dialing, open APIs, automation, and similar features are out of scope.
-
-A low-cost SMS forwarding device built around an **ESP32-C3** and an **ML307-series LTE module**. Incoming messages are received over UART in PDU mode, then pushed to one or more notification platforms over WiFi or 4G data. The latest messages are also stored locally, and the device exposes a responsive web management UI.
-
-<img src="assets/photo.png" width="220" alt="SMS forwarder device">
-
 ## Highlights
 
 - **AT-command based modem support** — works with ML307-series modules running their stock AT firmware.
@@ -158,33 +150,40 @@ Records are stored in SPIFFS at `/forward_history.bin` (file format version 2) a
 
 ## Screenshots
 
-| Status | Ping |
+| System Settings | SMS History |
 |---|---|
-| ![](assets/status.png) | ![](assets/ping.png) |
+| ![](assets/status.png) | ![](assets/history.png) |
 
-## Hardware
+| Push Channels | Network Test |
+|---|---|
+| ![](assets/push.png) | ![](assets/network.png) |
 
-If you cannot solder and want a ready-made unit, the following kit is available (the original author checked that its cost is comparable to a DIY build). It supports **China Mobile, China Unicom, and China Telecom SIM cards**:
+## Tested Hardware
 
-- [Little Blue Whale WiFi SMS Box](https://item.taobao.com/item.htm?id=1003711355912) — ask customer service for the SMS-forwarding variant.
-- [4G FPC antenna](https://item.taobao.com/item.htm?id=1003711355912&skuId=6162872574943) — buy together with the development board.
+This project was developed and verified on the following device:
 
-For a DIY build, the reference hardware costs about ¥27.8 (prices vary). The ML307R-DC DIY combination supports **China Mobile and China Unicom**:
+| Item | Specification |
+|---|---|
+| MCU | ESP32-C3 QFN32, revision v0.4 |
+| Flash | XMC 4 MB |
+| Cellular module | ML307A-DSLN-MTSH1S00 (CMCC) |
+| SIM | Nano SIM; China Unicom tested |
+| Programming/debug port | ESP32-C3 USB-Serial/JTAG |
+| Power | 5 V via USB |
+| Antenna | 4G FPC antenna |
 
-- ESP32-C3 development board — tested with [ESP32-C3 Super Mini](https://item.taobao.com/item.htm?id=852057780489&skuId=5813710390565), about ¥9.5 with shipping.
-- ML307R-DC development board — tested with the [Little Blue Whale ML307R-DC core board](https://item.taobao.com/item.htm?id=797466121802&skuId=5722077108045), about ¥16.3 with shipping.
-- [4G FPC antenna](https://item.taobao.com/item.htm?id=797466121802&skuId=5722077108045), about ¥2, bought with the core board.
+The ML307A-DSLN runs its stock AT firmware. The ESP32-C3 communicates with it over UART at 115200 baud. The tested unit has one accessible SIM slot; this firmware does not implement dual-SIM switching.
 
-The firmware also supports ML307A-series modules such as the ML307A-DSLN, provided the module runs its stock AT firmware.
+Other ESP32-C3 + ML307A boards should work if they expose the same UART and modem-enable pins, but they have not been verified.
 
 ## Wiring
 
-The ESP32-C3 and the ML307R-DC are connected through UART:
+The tested unit is an integrated ESP32-C3 + ML307A board, so no external wiring is required. For a custom build, connect the modem as follows:
 
 ```text
 ┌───────────────────────────────────────────────┐
 |                                               |
-|   ESP32-C3 Super Mini      ML307R-DC board    |
+|   ESP32-C3                ML307A module       |
 | ┌───────────────────┐    ┌─────────────────┐ |
 └─┼─ GPIO5 (MODEM_EN) │    │                 │ |
   │       GPIO3 (TX) ─┼───►│ RX              │ |
@@ -209,20 +208,20 @@ Connect the ESP32-C3 over USB for programming and power. During normal operation
 
 ## Software
 
-- The ESP32-C3 runs the Arduino firmware in `code/`. It connects to WiFi, receives SMS data from the ML307R/ML307A over UART, pushes messages through WiFi or 4G data according to the selected network mode, and writes local history.
-- The ML307R-DC runs its stock AT firmware; no custom modem firmware is required.
+- The ESP32-C3 runs the Arduino firmware in `code/`. It connects to WiFi, receives SMS data from the ML307A over UART, pushes messages through WiFi or 4G data according to the selected network mode, and writes local history.
+- The ML307A-DSLN runs its stock AT firmware; no custom modem firmware is required.
 
 Install the following library in Arduino IDE:
 
 - **pdulib** by David Henry, version `0.5.11` (PDU SMS encoding/decoding)
 
-Install ESP32 board support as described in the [official documentation](https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html), and select the `MakerGO ESP32 C3 SuperMini` board.
+Install ESP32 board support as described in the [official documentation](https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html). Select the ESP32-C3 board definition that matches your hardware; the tested unit uses a generic ESP32-C3, and the MakerGO ESP32 C3 SuperMini is also suitable for a DIY build.
 
 ### Build and flash
 
 1. Install the ESP32 board package and `pdulib`.
 2. Open `code/code.ino` in Arduino IDE.
-3. Select the `MakerGO ESP32 C3 SuperMini` board and the correct serial port.
+3. Select the matching ESP32-C3 board and the correct serial port.
 4. Compile and upload.
 
 With `arduino-cli`, the equivalent commands are:
@@ -230,8 +229,8 @@ With `arduino-cli`, the equivalent commands are:
 ```bash
 arduino-cli core install esp32:esp32
 arduino-cli lib install "pdulib@0.5.11"
-arduino-cli compile --fqbn esp32:esp32:makergo_c3_supermini code
-arduino-cli upload --fqbn esp32:esp32:makergo_c3_supermini --port /dev/ttyUSB0 code
+arduino-cli compile --fqbn esp32:esp32:esp32c3 code
+arduino-cli upload --fqbn esp32:esp32:esp32c3 --port /dev/ttyUSB0 code
 ```
 
 On Windows, replace `/dev/ttyUSB0` with the COM port shown by Device Manager.
