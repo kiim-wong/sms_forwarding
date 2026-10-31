@@ -6,8 +6,8 @@
 
 | Item | Value |
 |---|---|
-| Web management (tested device) | `http://192.168.10.166` |
 | Hotspot web management | `http://192.168.4.1` |
+| Default hotspot password | `12345678` |
 | Default administrator account | `admin` |
 | Default administrator password | `admin123` |
 
