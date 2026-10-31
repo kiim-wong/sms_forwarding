@@ -1,0 +1,298 @@
+# 低成本短信转发器
+
+[English](README.md) | [简体中文](README_zh.md)
+
+> 本项目基于 [chenxuuu/sms_forwarding](https://github.com/chenxuuu/sms_forwarding) 改进，遵循 MIT 许可证，详见 [LICENSE](LICENSE)。  
+> 本项目**仅用于接收短信**与进行保号相关功能。  
+> 多卡控制、通话、拨号、开放接口、自动化等功能，不会考虑支持，请勿提出相关需求。
+
+[原项目后台页面演示](https://sms.j2.cx/)
+
+本项目旨在使用低成本的硬件设备，实现短信的自动转发功能，支持多种推送方式同时启用。
+
+> 原项目视频教程：[B站视频](https://www.bilibili.com/video/BV1cSmABYEiX)
+
+<img src="assets/photo.png" width="200" />
+
+## 功能
+
+- 支持使用通用AT指令与模块进行通信
+- 开启后支持通过WEB界面配置短信转发参数、查询当前状态
+- **支持 Web 配置 WiFi**：系统设置的“WiFi 连接”卡片可扫描附近网络，并保存或保存并连接 SSID、加密方式和密码；配置写入 NVS 的 `wifi_config` 命名空间，重启后保持
+- **支持设备热点**：默认启用 `MAC末4位 + 短信转发` 热点，WPA2-AES；可在系统设置中开关热点、修改 SSID 和密码
+- **支持自动/手动选网**：默认自动选择运营商，也可在“选网配置”中填写 5-6 位 PLMN，手动锁定 LTE 网络
+- **支持多达5个推送通道同时启用**，每个通道可独立配置
+- **支持短信记录**：保留最近 10 条收到的短信记录（含黑名单拦截、管理员命令、未配置推送、无可用网络等），可在 Web 面板查看每条记录实际尝试的推送通道及成功/失败，并逐条删除（SPIFFS 持久化，重启不丢失）
+- **支持推送测试**：每个推送通道可用当前表单参数发送测试消息，单次尝试、不保存配置
+- **支持推送网络切换**：系统设置页可在 WiFi、4G 数据、WiFi 优先（失败自动使用 4G）三种模式间切换，短信转发与测试推送都按当前模式执行
+- 支持通过WEB界面主动发送短信，以便消耗余额
+- 支持通过WEB界面进行Ping测试，以极低的成本消耗余额
+- 支持长短信自动合并（30秒超时）
+- 支持管理员短信远程发送短信和重启设备
+- 支持号码精确/前缀/后缀黑名单和短信内容关键词黑名单
+- 支持 Apple 风格液体玻璃/毛玻璃 Web 界面，桌面与移动端自适应
+- **Web 导航**：侧边栏不再单列“账号管理”，底部“修改密码”按钮直接打开 `panel-account`（账号面板，标题为“修改密码”）
+
+## Web 界面
+
+单页 Web 管理界面包含以下面板：
+
+| 面板 | 用途 |
+|---|---|
+| **系统设置** | 设备状态、推送网络选择、WiFi 连接、热点配置和系统操作 |
+| **短信记录** | 最近 10 条短信及每个推送通道的结果，支持逐条删除 |
+| **推送通道** | 配置最多 5 个推送通道，并可逐个测试 |
+| **选网配置** | 自动或手动选择 LTE 运营商 |
+| **管理员 & 黑名单** | 管理员号码和黑名单规则 |
+| **发送短信** | 通过模组发送短信 |
+| **模组诊断** | 查询模组信息和信号状态 |
+| **网络测试** | Ping 测试和重启 WiFi |
+| **模组控制** | 重启或断电重启模组 |
+| **AT 终端** | 向模组发送 AT 指令 |
+| **系统日志** | 实时查看设备日志，自动刷新 |
+
+侧边栏底部“修改密码”按钮直接打开账号面板；账号管理不再单列在侧边栏中。
+
+## 黑名单
+
+Web 后台的“管理员 & 黑名单”页面支持四类规则：
+
+- **精确号码**：完整号码匹配；
+- **号码前缀**：号码以规则开头即命中；
+- **号码后缀**：号码以规则结尾即命中；
+- **内容关键词**：每行一个关键词，多个关键词之间是“或”关系，短信正文包含任意一个即命中。
+
+号码匹配会忽略空格、横线、括号，并统一 `+86`、`86`、`0086` 前缀。黑名单在推送前执行；命中后不推送，但仍会写入短信记录。管理员号码优先放行，避免拦截 `SMS:` 和 `RESET` 命令。
+
+ESP32 端只做字面量匹配，不执行正则表达式；需要正则规则时，继续放在云端 Worker 层处理。
+
+## 推送通道支持
+
+支持以下 11 种推送方式，可同时启用多个通道：
+
+| 推送方式 | 说明 | 需要配置 |
+|---------|------|---------|
+| **POST JSON** | 通用HTTP POST | URL |
+| **Bark** | iOS推送服务 | Bark服务器URL |
+| **GET请求** | URL参数方式 | URL |
+| **钉钉机器人** | 企业群通知 | Webhook URL，可选Secret加签 |
+| **PushPlus** | 微信公众号推送 | Token |
+| **Server酱** | 微信推送服务 | SendKey |
+| **自定义模板** | 灵活的JSON模板 | URL + 请求体模板 |
+| **飞书机器人** | 自定义通知 | Webhook URL |
+| **Gotify** | 自建推送服务 | 服务器URL + 应用Token |
+| **Telegram** | Bot API 推送 | Chat ID + Bot Token |
+| **企业微信机器人** | 企微群机器人 text 消息 | Webhook URL（含 key） |
+
+### 推送格式说明
+
+- **POST JSON**: `{"sender":"发送者号码","message":"短信内容","timestamp":"时间戳"}`
+- **Bark**: `{"title":"发送者号码","body":"短信内容"}`
+- **GET请求**: `URL?sender=xxx&message=xxx&timestamp=xxx`（自动URL编码）
+- **钉钉机器人**: 文本消息格式，支持加签验证
+- **PushPlus**: 使用Token推送，支持HTML格式
+- **Server酱**: 使用SendKey推送，支持Markdown格式
+- **自定义模板**: 使用`{sender}`、`{message}`、`{timestamp}`占位符
+- **飞书机器人**: 文本消息格式，支持加签验证
+- **Gotify**: `{"title":"短信来自: 发送者号码","message":"短信内容\n\n时间: 时间戳","priority":5}`
+- **Telegram**: 通过 Bot API 发送文本消息，使用 Chat ID + Bot Token
+- **企业微信机器人**: POST `{"msgtype":"text","text":{"content":"..."}}`，使用企微群机器人 Webhook URL
+
+所有推送渠道中的 `timestamp` / `时间` 字段统一为人类可读格式 `YYYY-MM-DD HH:MM:SS`，例如 `2026-10-31 18:10:36`。
+
+### 推送测试
+
+Web 后台“推送通道”页面中，每个通道都有独立的“测试”按钮。点击后会使用该通道**当前表单里的参数**（类型、URL、参数 1/2、自定义模板）发送一条测试消息，方便在保存前检查配置；测试只尝试一次，不写入 NVS，也不会改变已保存的配置。测试推送同样使用“系统设置 → 推送网络”当前选择的网络，不会绕过 WiFi/4G 路由。测试结果直接显示在按钮下方，详细过程可在“系统日志”页面查看。
+
+### 推送网络
+
+系统设置页的“推送网络”卡片提供三种模式，保存后立即生效并写入 NVS，重启后保持；未配置时默认仅 WiFi：
+
+- **WiFi**：只通过 WiFi 推送；WiFi 未连接时不发送，也不消耗 4G 流量。
+- **4G 数据**：只通过 ML307A 的 4G 数据发送，WiFi 是否连接不影响推送；会产生移动数据流量。
+- **WiFi 优先 · 数据兜底**：WiFi 已连接时优先走 WiFi；WiFi 未连接或发生连接建立/DNS/TLS 等传输层失败时切换到 4G。HTTP 4xx、平台业务错误和读取超时不会自动改走 4G，避免重复通知。
+
+4G 推送通过 ML307A 的 MHTTP/HTTPS 命令完成。当前 HTTPS 使用模组默认的无证书认证方式（TLS 仍加密，但不校验证书链），因此只应对可信的推送地址使用；如需严格校验证书，需要额外向模组写入 CA 证书，当前固件未包含此步骤。
+
+## WiFi 设置
+
+系统设置页的“WiFi 连接”卡片用于配置设备要连接的 WiFi，和“推送网络”是两件事：前者决定 ESP32 作为 STA 连接哪个 AP，后者决定短信推送走 WiFi 还是 4G。
+
+- **扫描**：点击“扫描”调用 `GET /wifi?action=scan`。固件同步扫描附近网络，按信号强度从强到弱返回 SSID、RSSI、加密方式和信道；同名网络会合并为信号最强的一条，最多返回 32 个。扫描期间 Web 请求会等待，已在线的 WiFi 可能短暂断开，扫描结束后固件会尝试重连。
+- **双频合一 WiFi**：ESP32-C3 只支持 2.4G；启动时会预扫描并锁定匹配 SSID 的最佳物理 BSSID 和信道，避免双频合一网络连接到不可用的 5G 虚拟 AP。
+- **加密方式**：`0` 自动、`1` 开放（无密码）、`2` WPA-WPA2（WPA / WPA2）、`3` WPA2、`4` WPA3。该选项设置的是 ESP32 的最低可接受安全等级；选“自动”时固件按默认 WPA2 门槛处理，若目标网络是开放或 WPA/WPA2，请明确选择对应项。
+- **保存**：`POST /wifi?action=save`，表单参数 `ssid`、`pass`、`auth`。只写入 NVS，不立即切换，返回“重启后生效”。SSID 不变且密码留空时会沿用已保存密码；开放网络会清空密码。
+- **保存并连接**：`POST /wifi?action=connect`，先保存上述参数，再断开当前 WiFi 并用新凭据连接，最长等待约 15 秒。接口会先返回响应，但 `success:true` 只表示请求已接受，不保证已经连上。切换网络后 DHCP 可能分配新 IP，旧页面/旧地址会失效，请用路由器后台或串口日志中的新 IP 重新打开。
+- **重启 WiFi**：网络测试页的“重启 WiFi”按钮调用 `GET /wifi?action=restart`，只使用 NVS 中已保存的凭据重连，不读取页面表单，也不会修改 NVS。
+- 凭据保存在 NVS namespace `wifi_config`，键为 `ssid`、`pass`、`auth`，由 `wifi_config.cpp` / `wifi_config.h` 负责运行时加载、保存和安全等级；没有保存值时回退到 `wifi_config.h` 的编译期默认值。密码不会在状态接口或页面回显。
+
+WiFi 设置只影响 ESP32 的 STA 连接（Web 管理入口和 WiFi 推送链路），不改变 Web 页面仍然使用 HTTP 80 端口，也不影响 4G MHTTP 的 HTTPS/证书策略；4G HTTPS 当前仍为模组 `auth=0`（TLS 加密、不校验证书链），与 WiFi 的加密方式无关。
+
+## 设备热点
+
+设备默认启用一个独立的配置热点，ESP32 使用 AP+STA 共存模式，所以连接设备热点不会影响原有的 WiFi 推送和 Web 管理（STA 地址通常仍可用）。
+
+- 默认 SSID：设备 MAC 末 4 位 + `短信转发`，例如 MAC 为 `80:53:e0:b7:66:80` 时是 `6680短信转发`；
+- 默认密码：`12345678`；
+- 加密方式：固定 WPA2-AES；
+- 默认启用，热点地址通常为 `192.168.4.1`；
+- 设备初始化后的首次登录会弹出“首次登录提示”，要求修改默认热点密码；在密码未改前，热点卡片会持续显示警告；
+- 系统设置的“热点配置”卡片支持启用/关闭、修改 SSID、修改密码，保存后立即应用；
+- 热点配置保存在 NVS 的 `ap_config` 命名空间，键为 `enabled`、`ssid`、`pass`、`passChanged`、`promptShown`。首次登录弹窗只提示一次；未改密码时卡片警告持续显示。
+
+热点接口：`GET /ap?action=status` 查询状态，`POST /ap?action=save` 保存并应用，参数为 `enabled`（`on`/空）、`ssid`、`pass`。密码为空时沿用当前密码，长度必须为 8-63 位。
+
+## 选网配置
+
+Web 后台“选网配置”页面支持：
+
+- **自动选择**：调用 `AT+COPS=0`，由模组自动选择运营商；
+- **手动指定**：填写 5 或 6 位数字 PLMN（MCC + MNC，例如 `46000`），调用 `AT+COPS=1,2,"<PLMN>",7` 仅选择 LTE 网络；
+- 保存后设备自动重启应用配置；
+- 配置存储于 NVS `sms_config` 的 `operatorMode` 和 `operatorCode`，默认 `operatorMode=0` 自动选网。
+
+## 短信记录
+
+设备会记录所有收到的短信，最多保留最近 10 条，超出后自动丢弃最旧的记录。记录范围包括普通转发的短信、命中号码或内容黑名单的短信、管理员命令短信、未配置有效推送通道的短信，以及当前推送网络不可用时收到的短信。
+
+每条记录包含发送者号码、短信时间戳、短信内容、处理状态、原因（如“号码黑名单”“内容关键词”“管理员命令”），以及实际尝试过的推送通道列表和每个通道的成功/失败结果；内容因超长被截断时也会标记。未进行推送的记录（如黑名单拦截、管理员命令、无可用网络）通道列表为空。
+
+记录保存在 SPIFFS 的 `/forward_history.bin`（文件格式 version 2），断电重启后仍然保留。Web 后台“短信记录”页面可查看全部记录及每条记录的实际推送结果，并支持逐条删除。
+
+## 界面预览
+
+|状态信息|主动ping|
+|-|-|
+|![](assets/status.png)|![](assets/ping.png)|
+
+## 硬件搭配
+
+若没有焊接能力，希望直接使用成品，可选直接购以下套件（我看过了，和自己做的成本一样）  
+支持**移动/联通/电信卡**：
+
+- [小蓝鲸WIFI短信宝](https://item.taobao.com/item.htm?id=1003711355912)（找客服问）
+- [4G FPC天线](https://item.taobao.com/item.htm?id=1003711355912&skuId=6162872574943)，与开发板同购
+
+如果希望自行焊接硬件，参考下面的硬件搭配，总成本约¥27.8（会有浮动，可按实际自行组合搭配）  
+仅支持**移动/联通卡**：
+
+- ESP32C3开发板，实测选用[ESP32C3 Super Mini](https://item.taobao.com/item.htm?id=852057780489&skuId=5813710390565)，¥9.5包邮
+- ML307R-DC开发板，实测选用[小蓝鲸ML307R-DC核心板](https://item.taobao.com/item.htm?id=797466121802&skuId=5722077108045)，¥16.3包邮
+- [4G FPC天线](https://item.taobao.com/item.htm?id=797466121802&skuId=5722077108045)，¥2，与核心板同购
+
+
+## 硬件连接
+
+ESP32C3 与 ML307R-DC 通过串口（UART）连接，接线如下：
+
+```
+┌───────────────────────────────────────────────┐
+|                                               |
+|   ESP32C3 Super Mini      ML307R-DC核心板     |
+| ┌───────────────────┐    ┌─────────────────┐ |
+└─┼─ GPIO5 (MODEM_EN) │    │                 │ |
+  │       GPIO3 (TX) ─┼───►│ RX              │ |
+  │                   │    │             EN ─┼─┘
+  │       GPIO4 (RX) ◄┼────┤ TX              │ 
+  │                   │    │                 │ 
+  │              GND ─┼────┤ GND             │ 
+  │                   │    │                 │ 
+  │               5V ─┼────┤ VCC (5V)        |
+  │                   │    │                 │
+  └───────────────────┘    └─────────────────┘
+                           │                 │
+                           │  SIM卡槽        │
+                           │  (插入Nano SIM) │
+                           │                 │
+                           │  天线接口       │
+                           │  (连接4G天线)   │
+                           └─────────────────┘
+```
+
+可通过USB连接ESP32C3进行编程和供电，正常工作时，可通过网页与模组进行AT通信，方便调试。
+
+## 软件组成
+
+- ESP32C3运行自己的`Arduino`固件，负责连接WiFi、通过 UART 接收 ML307R/ML307A 发送过来的短信数据，然后按配置选择 WiFi 或 4G 数据推送到 HTTP 接口或通知平台，并写入本地短信记录
+- ML307R-DC运行默认的AT固件，不用动
+
+需要在`Arduino IDE`中单独安装这些库：
+
+- **pdulib** by David Henry
+
+需要在`Arduino IDE`中安装ESP32开发板支持，参考[官方文档](https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html)，版型选`MakerGO ESP32 C3 SuperMini`。
+
+## 编译与烧录
+
+1. 在 Arduino IDE 中安装 ESP32 开发板支持包和 `pdulib` 库。
+2. 打开 `code/code.ino`。
+3. 选择 `MakerGO ESP32 C3 SuperMini` 开发板和正确的串口。
+4. 编译并上传。
+
+使用 `arduino-cli` 时，可参考以下命令：
+
+```bash
+arduino-cli core install esp32:esp32
+arduino-cli lib install "pdulib@0.5.11"
+arduino-cli compile --fqbn esp32:esp32:makergo_c3_supermini code
+arduino-cli upload --fqbn esp32:esp32:makergo_c3_supermini --port /dev/ttyUSB0 code
+```
+
+Windows 下请把 `/dev/ttyUSB0` 换成设备管理器显示的 COM 口。
+
+## 项目结构
+
+```text
+code/
+├── code.ino              # setup() 和 loop()
+├── config_types.h        # 枚举、结构体和常量
+├── globals.h / .cpp      # 全局对象和引脚定义
+├── config.h / .cpp       # NVS 配置读写与校验
+├── modem.h / .cpp        # AT 指令、模组电源控制、短信发送
+├── modem_http.h / .cpp   # ML307A MHTTP/HTTPS 数据通道
+├── push.h / .cpp         # 多通道推送和签名工具
+├── history.h / .cpp      # 短信记录（最近 10 条，SPIFFS 持久化）
+├── sms_process.h / .cpp  # PDU 解析、长短信合并、黑名单、管理员命令
+├── web_handlers.h / .cpp # HTTP 请求处理和日志环形缓冲区
+├── web_html.cpp          # 单页 Web 界面模板
+├── wifi_config.h / .cpp  # NVS WiFi 运行时配置
+└── ap_config.h / .cpp    # NVS 设备热点配置
+```
+
+更多开发文档见 [`dev_doc/`](dev_doc/README.md)。
+
+## 接口概览
+
+| 接口 | 方法 | 用途 |
+|---|---|---|
+| `/` | GET | Web 管理界面 |
+| `/save` | POST | 保存设备、黑名单、选网和推送通道配置 |
+| `/history` | GET | 返回短信记录 JSON |
+| `/history` | POST | `action=delete&id=<id>` 删除单条记录 |
+| `/testpush` | POST | 使用提交的表单参数发送测试推送 |
+| `/pushnet` | POST | 设置推送网络模式（`mode=0/1/2`） |
+| `/sendsms` | POST | 通过模组发送短信 |
+| `/ping` | POST | 执行 Ping 测试 |
+| `/wifi?action=status` | GET | 查询 WiFi 状态 |
+| `/wifi?action=scan` | GET | 扫描附近 WiFi |
+| `/wifi?action=save` | POST | 保存 WiFi 凭据 |
+| `/wifi?action=connect` | POST | 保存并连接 WiFi |
+| `/wifi?action=restart` | GET | 使用已保存凭据重连 WiFi |
+| `/ap?action=status` | GET | 查询热点状态 |
+| `/ap?action=save` | POST | 保存并应用热点配置 |
+| `/log` | GET | 返回日志环形缓冲区 JSON |
+| `/system?action=restart` | POST | 重启 ESP32 |
+| `/at` | POST | 向模组发送 AT 指令 |
+
+除浏览器登录认证外，所有接口都需要 HTTP Basic Authentication。
+
+## 安全提示
+
+- Web 管理界面使用 HTTP Basic Authentication，且页面本身走明文 HTTP；请只在可信局域网内使用，并在首次登录后修改默认 Web 密码。
+- 首次登录后请修改默认热点密码。界面会弹出提示，并在密码未修改前持续显示警告。
+- 4G HTTPS 使用模组 `auth=0` 模式：TLS 加密传输，但不校验证书链。只应向可信地址发送推送。
+- `AT` 终端和模组控制接口可能中断网络连接，请限制管理网络的访问范围。
+
+## 许可证与致谢
+
+本项目遵循 [MIT License](LICENSE)，基于 [chenxuuu/sms_forwarding](https://github.com/chenxuuu/sms_forwarding) 改进，原始版权声明保留在许可证文件中。
