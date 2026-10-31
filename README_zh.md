@@ -2,6 +2,17 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
+## 默认访问信息
+
+| 项目 | 值 |
+|---|---|
+| 后台地址（实测设备） | `http://192.168.10.166` |
+| 热点后台地址 | `http://192.168.4.1` |
+| 默认管理员账号 | `admin` |
+| 默认管理员密码 | `admin123` |
+
+设备 IP 由路由器 DHCP 分配，重连或更换网络后可能变化；如果地址无法访问，请在路由器客户端列表或串口日志中查看新地址。默认管理员密码仅在尚未修改过密码时生效，首次登录后请及时修改。
+
 ## 功能
 
 - 支持使用通用AT指令与模块进行通信
@@ -233,6 +244,24 @@ arduino-cli upload --fqbn esp32:esp32:esp32c3 --port /dev/ttyUSB0 code
 ```
 
 Windows 下请把 `/dev/ttyUSB0` 换成设备管理器显示的 COM 口。
+
+### 预编译固件
+
+仓库包含实测 ESP32-C3 + ML307A 设备的应用固件：
+
+- 文件：[`firmware/sms_forwarding-esp32c3-ml307a-20261031.bin`](firmware/sms_forwarding-esp32c3-ml307a-20261031.bin)
+- 大小：`1,236,192` 字节
+- SHA-256：`a66db6738bcc539e57c8af366f06e2edacddcdf0d79ed03ab91e7f0873413fac`（同时见 [`firmware/SHA256SUMS`](firmware/SHA256SUMS)）
+- 源码提交：`29174f8`
+- 实测 4 MB 分区布局的刷写地址：`app0 @ 0x10000`、`app1 @ 0x1f0000`
+
+该文件仅包含应用固件，不包含 bootloader、分区表和 NVS。只写入 app 分区时，已有的 WiFi、Web 登录、推送通道等 NVS 配置会保留。
+
+```bash
+esptool.py --chip esp32c3 --port /dev/ttyUSB0 --baud 460800 write_flash \
+  0x10000 firmware/sms_forwarding-esp32c3-ml307a-20261031.bin \
+  0x1f0000 firmware/sms_forwarding-esp32c3-ml307a-20261031.bin
+```
 
 ## 项目结构
 

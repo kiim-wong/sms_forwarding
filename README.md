@@ -2,6 +2,17 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
+## Default Access
+
+| Item | Value |
+|---|---|
+| Web management (tested device) | `http://192.168.10.166` |
+| Hotspot web management | `http://192.168.4.1` |
+| Default administrator account | `admin` |
+| Default administrator password | `admin123` |
+
+The station IP is assigned by the router through DHCP and can change after reconnecting or moving to another network. If the address is no longer reachable, check the router's client list or the serial log. The default administrator password is used only until a new password is saved; change it after the first login.
+
 ## Highlights
 
 - **AT-command based modem support** — works with ML307-series modules running their stock AT firmware.
@@ -234,6 +245,24 @@ arduino-cli upload --fqbn esp32:esp32:esp32c3 --port /dev/ttyUSB0 code
 ```
 
 On Windows, replace `/dev/ttyUSB0` with the COM port shown by Device Manager.
+
+### Prebuilt Firmware
+
+A prebuilt application image for the tested ESP32-C3 + ML307A device is included in this repository:
+
+- File: [`firmware/sms_forwarding-esp32c3-ml307a-20261031.bin`](firmware/sms_forwarding-esp32c3-ml307a-20261031.bin)
+- Size: `1,236,192` bytes
+- SHA-256: `a66db6738bcc539e57c8af366f06e2edacddcdf0d79ed03ab91e7f0873413fac` (also in [`firmware/SHA256SUMS`](firmware/SHA256SUMS))
+- Source commit: `29174f8`
+- Flash offsets for the tested 4 MB layout: `app0 @ 0x10000`, `app1 @ 0x1f0000`
+
+This is the application image only; it does not contain the bootloader, partition table, or NVS. Writing just the app partitions preserves the existing WiFi, web login, push-channel, and other NVS settings.
+
+```bash
+esptool.py --chip esp32c3 --port /dev/ttyUSB0 --baud 460800 write_flash \
+  0x10000 firmware/sms_forwarding-esp32c3-ml307a-20261031.bin \
+  0x1f0000 firmware/sms_forwarding-esp32c3-ml307a-20261031.bin
+```
 
 ## Project Structure
 
