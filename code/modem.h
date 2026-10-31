@@ -4,6 +4,10 @@
 #include "globals.h"
 
 String sendATCommand(const char* cmd, unsigned long timeout);
+String sendATCommandLocked(const char* cmd, unsigned long timeout);
+bool modemCommandBusy();
+bool modemLock();
+void modemUnlock();
 void modemPowerCycle();
 void resetModule();
 void modemInit();

@@ -1,9 +1,11 @@
 #include "web_handlers.h"
 #include "web_html.h"
 #include "config.h"
+#include "history.h"
 #include "modem.h"
 #include "push.h"
 #include "wifi_config.h"
+#include "ap_config.h"
 
 // ---- 日志环形缓冲区 ----
 String logBuffer[LOG_BUF_SIZE];
@@ -71,41 +73,203 @@ bool checkAuth() {
   return true;
 }
 
-// 处理配置页面请求
-void handleRoot() {
-  if (!checkAuth()) return;
-  
-  String html = String(htmlPage);
+// HTML 转义，避免配置值破坏属性或 textarea 内容
+static String htmlEscape(const String& input) {
+  String output;
+  output.reserve(input.length() + 16);
+  for (unsigned int i = 0; i < input.length(); i++) {
+    char c = input.charAt(i);
+    switch (c) {
+      case '&': output += "&amp;"; break;
+      case '<': output += "&lt;"; break;
+      case '>': output += "&gt;"; break;
+      case '"': output += "&quot;"; break;
+      case '\'': output += "&#39;"; break;
+      default: output += c; break;
+    }
+  }
+  return output;
+}
+
+// 发送黑白灰 Apple 风格结果页
+static void sendResultPage(bool success, const String& title, const String& message, const String& refreshUrl) {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="refresh" content="3;url=%REFRESH%">
+  <title>%TITLE%</title>
+  <style>
+    :root {
+      --ink: #142235;
+      --muted: #667085;
+      --line: rgba(20, 34, 53, .12);
+      --glass: rgba(255, 255, 255, .66);
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(60% 55% at 12% 8%, rgba(255,255,255,.92), transparent 72%),
+        radial-gradient(50% 45% at 88% 92%, rgba(140,155,175,.28), transparent 76%),
+        linear-gradient(145deg, #edf2f7 0%, #dce5ee 52%, #cfd9e4 100%);
+    }
+    .result-card {
+      width: min(430px, 100%);
+      padding: 30px 28px;
+      text-align: center;
+      border: 1px solid rgba(255, 255, 255, .72);
+      border-radius: 30px;
+      background: var(--glass);
+      -webkit-backdrop-filter: blur(28px) saturate(165%);
+      backdrop-filter: blur(28px) saturate(165%);
+      box-shadow: 0 28px 80px rgba(20, 34, 53, .16), inset 0 1px 0 rgba(255,255,255,.78);
+    }
+    .result-icon {
+      width: 54px;
+      height: 54px;
+      margin: 0 auto 18px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      background: rgba(20, 34, 53, .055);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.8);
+    }
+    .result-icon svg {
+      width: 25px;
+      height: 25px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    h1 { margin: 0 0 10px; font-size: 21px; line-height: 1.3; letter-spacing: -.02em; }
+    p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+    @media (prefers-reduced-transparency: reduce) {
+      .result-card { background: #f7f9fb; -webkit-backdrop-filter: none; backdrop-filter: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="result-card" role="status" aria-live="polite">
+    <div class="result-icon" aria-hidden="true"><svg viewBox="0 0 24 24">%ICON%</svg></div>
+    <h1>%TITLE%</h1>
+    <p>%MESSAGE%</p>
+  </main>
+</body>
+</html>
+)rawliteral";
+
+  html.replace("%REFRESH%", htmlEscape(refreshUrl));
+  html.replace("%TITLE%", htmlEscape(title));
+  html.replace("%MESSAGE%", htmlEscape(message));
+  html.replace("%ICON%", success ? "<path d=\"M5 12.5 10 17l9-10\"/>" : "<path d=\"M7 7l10 10M17 7 7 17\"/>");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "text/html; charset=utf-8", html);
+}
+
+// 对 HTML 片段应用配置值占位符
+static bool apPromptNeededThisPage = false;
+
+static void applyHtmlConfig(String& html) {
   html.replace("%IP%", WiFi.localIP().toString());
-  html.replace("%WIFI_SSID%", String(WiFi.SSID()));
+  String currentSsid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : loadWifiSetting("ssid", WIFI_SSID);
+  html.replace("%WIFI_SSID%", htmlEscape(currentSsid));
+  html.replace("%WIFI_STATUS_TEXT%", WiFi.status() == WL_CONNECTED ? "已连接" : "未连接");
+  html.replace("%WIFI_RSSI_TEXT%", WiFi.status() == WL_CONNECTED
+                                       ? (String(WiFi.RSSI()) + " dBm")
+                                       : String("--"));
+  html.replace("%WIFI_SAVED_SSID%", htmlEscape(loadWifiSetting("ssid", WIFI_SSID)));
+  html.replace("%WIFI_AUTH_MODE%", String((int)loadWifiAuth()));
+  html.replace("%OP_MODE_AUTO%", config.operatorMode == 0 ? " selected" : "");
+  html.replace("%OP_MODE_MANUAL%", config.operatorMode == 1 ? " selected" : "");
+  html.replace("%OPERATOR_CODE%", htmlEscape(config.operatorCode));
+  bool apEnabled = loadApEnabled();
+  bool apRunning = (WiFi.getMode() & WIFI_AP) != 0;
+  html.replace("%AP_ENABLED%", apEnabled ? "1" : "0");
+  html.replace("%AP_ENABLED_CHECKED%", apEnabled ? " checked" : "");
+  html.replace("%AP_SSID%", htmlEscape(loadApSsid()));
+  html.replace("%AP_DEFAULT_SSID%", htmlEscape(defaultApSsid()));
+  html.replace("%AP_STATUS_TEXT%", apRunning ? "已启用" : "已关闭");
+  html.replace("%AP_IP%", apRunning ? WiFi.softAPIP().toString() : String("--"));
+  html.replace("%AP_CLIENTS%", String(apRunning ? WiFi.softAPgetStationNum() : 0));
+  html.replace("%AP_PASSWORD_CHANGED%", loadApPasswordChanged() ? "1" : "0");
+  html.replace("%AP_PROMPT_NEEDED%", apPromptNeededThisPage ? "1" : "0");
+  html.replace("%AP_DEFAULT_PASSWORD%", AP_DEFAULT_PASSWORD);
   html.replace("%FREE_HEAP%", String(ESP.getFreeHeap() / 1024) + " KB");
   long uptimeSec = millis() / 1000;
   char uptimeBuf[16];
   snprintf(uptimeBuf, sizeof(uptimeBuf), "%ld:%02ld:%02ld", uptimeSec / 3600, (uptimeSec % 3600) / 60, uptimeSec % 60);
   html.replace("%UPTIME%", String(uptimeBuf));
-  html.replace("%WEB_USER%", config.webUser);
-  html.replace("%WEB_PASS%", config.webPass);
-  html.replace("%SMTP_SERVER%", config.smtpServer);
-  html.replace("%SMTP_PORT%", String(config.smtpPort));
-  html.replace("%SMTP_USER%", config.smtpUser);
-  html.replace("%SMTP_PASS%", config.smtpPass);
-  html.replace("%SMTP_SEND_TO%", config.smtpSendTo);
-  html.replace("%ADMIN_PHONE%", config.adminPhone);
-  html.replace("%NUMBER_BLACK_LIST%", config.numberBlackList);
+  html.replace("%WEB_USER%", htmlEscape(config.webUser));
+  html.replace("%WEB_PASS%", htmlEscape(config.webPass));
+  html.replace("%ADMIN_PHONE%", htmlEscape(config.adminPhone));
+  html.replace("%NUMBER_BLACK_LIST%", htmlEscape(config.numberBlackList));
+  html.replace("%NUMBER_PREFIX_BLACK_LIST%", htmlEscape(config.numberPrefixBlackList));
+  html.replace("%NUMBER_SUFFIX_BLACK_LIST%", htmlEscape(config.numberSuffixBlackList));
+  html.replace("%CONTENT_BLACK_LIST%", htmlEscape(config.contentBlackList));
 
   // 概览页面的配置状态
-  bool emailOk = config.smtpServer.length() > 0 && config.smtpUser.length() > 0 &&
-                 config.smtpPass.length() > 0 && config.smtpSendTo.length() > 0;
-  html.replace("%SMTP_CHECK%", emailOk ? "已配置" : "未配置");
+  html.replace("%HISTORY_COUNT%", String(forwardHistoryCount()));
   html.replace("%MODEM_CHECK%", modemReady ? "已就绪" : "未就绪");
+  html.replace("%PUSH_NET_MODE%", String((int)config.pushNetworkMode));
   int pushCount = 0;
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
     if (config.pushChannels[i].enabled) pushCount++;
   }
   html.replace("%PUSH_COUNT%", String(pushCount));
+}
+
+// 处理配置页面请求
+void handleRoot() {
+  if (!checkAuth()) return;
+
+  apPromptNeededThisPage = !loadApPasswordChanged() && !loadApPromptShown();
+  if (apPromptNeededThisPage) markApPromptShown();
+
+  // 无 PSRAM 的 ESP32 上单个 Arduino String 上限为 65,535 字节，整页约 73 KB，装不下。
+  // 以推送通道为界分段流式发送，避免 String 容量上限和堆内存峰值。
+  const char* pushToken = "%PUSH_CHANNELS%";
+  const char* pushPos = strstr(htmlPage, pushToken);
+  if (!pushPos) {
+    server.send(500, "text/plain", "HTML template placeholder missing");
+    return;
+  }
+
+  // 禁用缓存：固件更新后确保浏览器拉取新版页面，避免旧版 UI 与新固件不匹配
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", "");
+
+  unsigned int beforeLen = (unsigned int)(pushPos - htmlPage);
+  {
+    String htmlBefore(htmlPage, beforeLen);
+    if (htmlBefore.length() != beforeLen) {
+      logCaptureLn(String("[ERR] 首页前段内存不足"));
+      server.sendContent("", 0);
+      return;
+    }
+    applyHtmlConfig(htmlBefore);
+    server.sendContent(htmlBefore);
+  }
   
   // 生成推送通道HTML
   String channelsHtml = "";
+  channelsHtml.reserve(MAX_PUSH_CHANNELS * 2600);
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
     String idx = String(i);
     String enabledClass = config.pushChannels[i].enabled ? " enabled" : "";
@@ -115,13 +279,15 @@ void handleRoot() {
     channelsHtml += "<div class=\"push-channel-header\">";
     channelsHtml += "<input type=\"checkbox\" name=\"push" + idx + "en\" id=\"push" + idx + "en\" onchange=\"toggleChannel(" + idx + ")\"" + checked + ">";
     channelsHtml += "<label for=\"push" + idx + "en\" class=\"label-inline\">启用推送通道 " + String(i + 1) + "</label>";
+    channelsHtml += "<button type=\"button\" class=\"btn btn-secondary btn-sm push-test-btn\" id=\"testBtn" + idx + "\" onclick=\"testPush(" + idx + ")\">测试</button>";
     channelsHtml += "</div>";
+    channelsHtml += "<div class=\"result-box push-test-result\" id=\"testResult" + idx + "\"></div>";
     channelsHtml += "<div class=\"push-channel-body\">";
     
     // 通道名称
     channelsHtml += "<div class=\"form-group\">";
     channelsHtml += "<label>通道名称</label>";
-    channelsHtml += "<input type=\"text\" name=\"push" + idx + "name\" value=\"" + config.pushChannels[i].name + "\" placeholder=\"自定义名称\">";
+    channelsHtml += "<input type=\"text\" name=\"push" + idx + "name\" value=\"" + htmlEscape(config.pushChannels[i].name) + "\" placeholder=\"自定义名称\">";
     channelsHtml += "</div>";
     
     // 推送类型
@@ -138,6 +304,7 @@ void handleRoot() {
     channelsHtml += "<option value=\"8\"" + String(config.pushChannels[i].type == PUSH_TYPE_FEISHU ? " selected" : "") + ">飞书机器人</option>";
     channelsHtml += "<option value=\"9\"" + String(config.pushChannels[i].type == PUSH_TYPE_GOTIFY ? " selected" : "") + ">Gotify</option>";
     channelsHtml += "<option value=\"10\"" + String(config.pushChannels[i].type == PUSH_TYPE_TELEGRAM ? " selected" : "") + ">Telegram Bot</option>";
+    channelsHtml += "<option value=\"11\"" + String(config.pushChannels[i].type == PUSH_TYPE_WECOM ? " selected" : "") + ">企业微信机器人</option>";
     channelsHtml += "</select>";
     channelsHtml += "<div class=\"push-type-hint\" id=\"hint" + idx + "\"></div>";
     channelsHtml += "</div>";
@@ -145,18 +312,18 @@ void handleRoot() {
     // URL
     channelsHtml += "<div class=\"form-group\">";
     channelsHtml += "<label>推送URL/Webhook</label>";
-    channelsHtml += "<input type=\"text\" name=\"push" + idx + "url\" id=\"url" + idx + "\" value=\"" + config.pushChannels[i].url + "\" placeholder=\"http://your-server.com/api 或 webhook地址\">";
+    channelsHtml += "<input type=\"text\" name=\"push" + idx + "url\" id=\"url" + idx + "\" value=\"" + htmlEscape(config.pushChannels[i].url) + "\" placeholder=\"http://your-server.com/api 或 webhook地址\">";
     channelsHtml += "</div>";
     
     // 额外参数区域（钉钉/PushPlus/Server酱等需要）
     channelsHtml += "<div id=\"extra" + idx + "\" style=\"display:none;\">";
     channelsHtml += "<div class=\"form-group\">";
     channelsHtml += "<label id=\"key1label" + idx + "\">参数1</label>";
-    channelsHtml += "<input type=\"text\" name=\"push" + idx + "key1\" id=\"key1" + idx + "\" value=\"" + config.pushChannels[i].key1 + "\">";
+    channelsHtml += "<input type=\"text\" name=\"push" + idx + "key1\" id=\"key1" + idx + "\" value=\"" + htmlEscape(config.pushChannels[i].key1) + "\">";
     channelsHtml += "</div>";
     channelsHtml += "<div class=\"form-group\" id=\"key2group" + idx + "\">";
     channelsHtml += "<label id=\"key2label" + idx + "\">参数2</label>";
-    channelsHtml += "<input type=\"text\" name=\"push" + idx + "key2\" id=\"key2" + idx + "\" value=\"" + config.pushChannels[i].key2 + "\">";
+    channelsHtml += "<input type=\"text\" name=\"push" + idx + "key2\" id=\"key2" + idx + "\" value=\"" + htmlEscape(config.pushChannels[i].key2) + "\">";
     channelsHtml += "</div>";
     channelsHtml += "</div>";
     
@@ -164,19 +331,25 @@ void handleRoot() {
     channelsHtml += "<div id=\"custom" + idx + "\" style=\"display:none;\">";
     channelsHtml += "<div class=\"form-group\">";
     channelsHtml += "<label>请求体模板（使用 {sender} {message} {timestamp} 占位符）</label>";
-    channelsHtml += "<textarea name=\"push" + idx + "body\" rows=\"4\" style=\"width:100%;font-family:monospace;\">" + config.pushChannels[i].customBody + "</textarea>";
+    channelsHtml += "<textarea name=\"push" + idx + "body\" rows=\"4\" style=\"width:100%;font-family:monospace;\">" + htmlEscape(config.pushChannels[i].customBody) + "</textarea>";
     channelsHtml += "</div>";
     channelsHtml += "</div>";
     
     channelsHtml += "</div></div>";
   }
-  html.replace("%PUSH_CHANNELS%", channelsHtml);
-  
-  // 禁用缓存：固件更新后确保浏览器拉取新版页面，避免旧版 UI 与新固件不匹配
-  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "0");
-  server.send(200, "text/html", html);
+  server.sendContent(channelsHtml);
+
+  {
+    String htmlAfter(pushPos + strlen(pushToken));
+    if (htmlAfter.length() == 0) {
+      logCaptureLn(String("[ERR] 首页后段内存不足"));
+      server.sendContent("", 0);
+      return;
+    }
+    applyHtmlConfig(htmlAfter);
+    server.sendContent(htmlAfter);
+  }
+  server.sendContent("", 0);
 }
 
 // 处理工具箱页面请求 — 已整合到主页，直接返回主页
@@ -208,16 +381,16 @@ void handleFlightMode() {
       String statusIcon;
       if (mode == 0) {
         modeStr = "最小功能模式（关机）";
-        statusIcon = "🔴";
+        statusIcon = "<span class=\"mono-mark\">○</span>";
       } else if (mode == 1) {
         modeStr = "全功能模式（正常）";
-        statusIcon = "🟢";
+        statusIcon = "<span class=\"mono-mark\">●</span>";
       } else if (mode == 4) {
         modeStr = "飞行模式（射频关闭）";
-        statusIcon = "✈️";
+        statusIcon = "<span class=\"mono-mark\">◐</span>";
       } else {
         modeStr = "未知模式 (" + String(mode) + ")";
-        statusIcon = "❓";
+        statusIcon = "<span class=\"mono-mark\">?</span>";
       }
       
       message = "<table class='info-table'>";
@@ -248,9 +421,9 @@ void handleFlightMode() {
       if (setResp.indexOf("OK") >= 0) {
         success = true;
         if (newMode == 4) {
-          message = "已开启飞行模式 ✈️<br>模组射频已关闭，无法收发短信";
+          message = "已开启飞行模式<br>模组射频已关闭，无法收发短信";
         } else {
-          message = "已关闭飞行模式 🟢<br>模组恢复正常工作";
+          message = "已关闭飞行模式<br>模组恢复正常工作";
         }
       } else {
         message = "切换失败: " + setResp;
@@ -265,7 +438,7 @@ void handleFlightMode() {
     String resp = sendATCommand("AT+CFUN=4", 5000);
     if (resp.indexOf("OK") >= 0) {
       success = true;
-      message = "已开启飞行模式 ✈️";
+      message = "已开启飞行模式";
     } else {
       message = "开启失败: " + resp;
     }
@@ -276,7 +449,7 @@ void handleFlightMode() {
     String resp = sendATCommand("AT+CFUN=1", 5000);
     if (resp.indexOf("OK") >= 0) {
       success = true;
-      message = "已关闭飞行模式 🟢";
+      message = "已关闭飞行模式";
     } else {
       message = "关闭失败: " + resp;
     }
@@ -440,17 +613,17 @@ void handleQuery() {
     // 查询IMSI
     String resp = sendATCommand("AT+CIMI", 2000);
     String imsi = "未知";
-    if (resp.indexOf("OK") >= 0) {
-      int start = resp.indexOf('\n');
-      if (start >= 0) {
-        int end = resp.indexOf('\n', start + 1);
-        if (end < 0) end = resp.indexOf('\r', start + 1);
-        if (end > start) {
-          imsi = resp.substring(start + 1, end);
-          imsi.trim();
-          if (imsi == "OK" || imsi.length() < 10) imsi = "未知";
-        }
+    int lineStart = 0;
+    while (lineStart < resp.length()) {
+      int lineEnd = resp.indexOf('\n', lineStart);
+      if (lineEnd < 0) lineEnd = resp.length();
+      String line = resp.substring(lineStart, lineEnd);
+      line.trim();
+      if (line.length() >= 10 && line != "OK" && !line.startsWith("AT+")) {
+        imsi = line;
+        break;
       }
+      lineStart = lineEnd + 1;
     }
     message += "<tr><td>IMSI</td><td>" + imsi + "</td></tr>";
     
@@ -640,44 +813,19 @@ void handleSendSms() {
     resultMsg = success ? "短信发送成功！" : "短信发送失败，请检查模组状态";
   }
   
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="3;url=/sms">
-  <title>发送结果</title>
-  <style>
-    body { font-family: Arial, sans-serif; text-align: center; padding-top: 100px; background: #f5f5f5; }
-    .result { padding: 20px; border-radius: 10px; display: inline-block; }
-    .success { background: #4CAF50; color: white; }
-    .error { background: #f44336; color: white; }
-  </style>
-</head>
-<body>
-  <div class="result %CLASS%">
-    <h2>%ICON% %MSG%</h2>
-    <p>3秒后返回发送页面...</p>
-  </div>
-</body>
-</html>
-)rawliteral";
-  
-  html.replace("%CLASS%", success ? "success" : "error");
-  html.replace("%ICON%", success ? "✅" : "❌");
-  html.replace("%MSG%", resultMsg);
-  
-  server.send(200, "text/html", html);
+  sendResultPage(success, success ? "短信已发送" : "短信发送失败", resultMsg + " 3 秒后返回发送页面。", "/sms");
 }
 
 // 处理Ping请求
 void handlePing() {
   if (!checkAuth()) return;
+
+  if (modemCommandBusy()) {
+    server.send(429, "application/json", "{\"success\":false,\"message\":\"模组正在执行其他操作，请稍后重试\"}");
+    return;
+  }
   
   logCaptureLn(String("网页端发起Ping请求"));
-  
-  // 清空串口缓冲区
-  while (Serial1.available()) Serial1.read();
   
   // 激活PDP上下文（数据连接）
   logCaptureLn(String("激活数据连接(CGACT)..."));
@@ -690,8 +838,6 @@ void handlePing() {
     logCaptureLn(String("数据连接激活失败，尝试继续执行..."));
   }
   
-  // 清空串口缓冲区
-  while (Serial1.available()) Serial1.read();
   delay(500);  // 等待网络稳定
   
   // 发送MPING命令，ping 8.8.8.8，超时30秒，ping 1次
@@ -852,6 +998,8 @@ void handlePing() {
 void handleSave() {
   if (!checkAuth()) return;
 
+  bool operatorConfigChanged = false;
+
   // 账号管理表单：只在字段存在时更新
   if (server.hasArg("webUser")) {
     String newWebUser = server.arg("webUser");
@@ -864,30 +1012,43 @@ void handleSave() {
     config.webPass = newWebPass;
   }
 
-  // 邮件通知表单：只在字段存在时更新
-  if (server.hasArg("smtpServer")) {
-    config.smtpServer = server.arg("smtpServer");
-  }
-  if (server.hasArg("smtpPort")) {
-    config.smtpPort = server.arg("smtpPort").toInt();
-    if (config.smtpPort == 0) config.smtpPort = 465;
-  }
-  if (server.hasArg("smtpUser")) {
-    config.smtpUser = server.arg("smtpUser");
-  }
-  if (server.hasArg("smtpPass")) {
-    config.smtpPass = server.arg("smtpPass");
-  }
-  if (server.hasArg("smtpSendTo")) {
-    config.smtpSendTo = server.arg("smtpSendTo");
-  }
-
   // 管理员 & 黑名单表单：只在字段存在时更新
   if (server.hasArg("adminPhone")) {
     config.adminPhone = server.arg("adminPhone");
   }
   if (server.hasArg("numberBlackList")) {
     config.numberBlackList = server.arg("numberBlackList");
+  }
+  if (server.hasArg("numberPrefixBlackList")) {
+    config.numberPrefixBlackList = server.arg("numberPrefixBlackList");
+  }
+  if (server.hasArg("numberSuffixBlackList")) {
+    config.numberSuffixBlackList = server.arg("numberSuffixBlackList");
+  }
+  if (server.hasArg("contentBlackList")) {
+    config.contentBlackList = server.arg("contentBlackList");
+  }
+
+  // 选网配置：自动或按 PLMN 手动选择运营商。
+  if (server.hasArg("operatorMode")) {
+    uint8_t newMode = (uint8_t)server.arg("operatorMode").toInt();
+    if (newMode > 1) newMode = 0;
+    String newCode = server.arg("operatorCode");
+    newCode.trim();
+
+    bool validPlmn = newCode.length() == 5 || newCode.length() == 6;
+    for (unsigned int i = 0; validPlmn && i < newCode.length(); i++) {
+      validPlmn = isDigit(newCode.charAt(i));
+    }
+    if (newMode == 1 && !validPlmn) {
+      sendResultPage(false, "选网配置无效", "手动选网需要填写 5 或 6 位数字 PLMN。", "/");
+      return;
+    }
+
+    operatorConfigChanged = config.operatorMode != newMode ||
+                            config.operatorCode != newCode;
+    config.operatorMode = newMode;
+    config.operatorCode = newCode;
   }
 
   // 推送通道配置：只在对应通道的字段存在时更新
@@ -919,37 +1080,120 @@ void handleSave() {
   
   saveConfig();
   configValid = isConfigValid();
-  
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="3;url=/">
-  <title>保存成功</title>
-  <style>
-    body { font-family: Arial, sans-serif; text-align: center; padding-top: 100px; background: #f5f5f5; }
-    .success { background: #4CAF50; color: white; padding: 20px; border-radius: 10px; display: inline-block; }
-  </style>
-</head>
-<body>
-  <div class="success">
-    <h2>✅ 配置保存成功！</h2>
-    <p>3秒后返回配置页面...</p>
-    <p>如果修改了账号密码，请使用新的账号密码登录</p>
-  </div>
-</body>
-</html>
-)rawliteral";
-  server.send(200, "text/html", html);
-  
-  // 如果配置有效，发送启动通知
-  if (configValid) {
-    logCaptureLn(String("配置有效，发送启动通知..."));
-    String subject = "短信转发器配置已更新";
-    String body = "设备配置已更新\n设备地址: " + getDeviceUrl();
-    sendEmailNotification(subject.c_str(), body.c_str());
+  String saveMessage = operatorConfigChanged
+                           ? "选网配置已保存，设备正在重启应用..."
+                           : "3 秒后返回配置页面。如修改了账号或密码，请使用新凭据登录。";
+  sendResultPage(true, "配置已保存", saveMessage, "/");
+
+  if (operatorConfigChanged) {
+    delay(800);
+    ESP.restart();
   }
+}
+
+static String currentLocalTimestamp() {
+  time_t now = time(nullptr);
+  if (now < 100000) return "时间未同步";
+  struct tm localTime;
+  localtime_r(&now, &localTime);
+  char buf[24];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &localTime);
+  return String(buf);
+}
+
+// 转发历史查询与删除
+void handleHistory() {
+  if (!checkAuth()) return;
+
+  if (server.method() == HTTP_POST) {
+    String action = server.arg("action");
+    String json = "{\"success\":false,\"message\":\"未知操作\"}";
+    if (action == "delete") {
+      uint32_t id = (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 10);
+      if (id > 0 && deleteForwardHistory(id)) {
+        json = "{\"success\":true,\"message\":\"记录已删除\"}";
+      } else {
+        json = "{\"success\":false,\"message\":\"记录不存在\"}";
+      }
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", forwardHistoryToJson());
+}
+
+// 使用当前表单参数测试单个推送通道，不保存配置
+void handleTestPush() {
+  if (!checkAuth()) return;
+
+  int index = server.arg("index").toInt();
+  if (index < 0 || index >= MAX_PUSH_CHANNELS) {
+    server.send(400, "application/json", "{\"success\":false,\"message\":\"通道索引无效\"}");
+    return;
+  }
+
+  PushChannel channel;
+  channel.enabled = true;
+  channel.type = (PushType)server.arg("type").toInt();
+  channel.name = server.arg("name");
+  channel.url = server.arg("url");
+  channel.key1 = server.arg("key1");
+  channel.key2 = server.arg("key2");
+  channel.customBody = server.arg("body");
+  if (channel.name.length() == 0) channel.name = "通道" + String(index + 1);
+
+  if (!isPushChannelValid(channel)) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"通道配置不完整，请先填写必填项\"}");
+    return;
+  }
+
+  webLongOperationActive = true;
+  bool ok = sendToChannel(channel, "测试", "这是一条来自短信转发器的测试推送。",
+                          currentLocalTimestamp().c_str(), true);
+  webLongOperationActive = false;
+  String json = "{\"success\":";
+  json += ok ? "true" : "false";
+  json += ",\"message\":\"";
+  json += ok ? "测试推送已发送" : "测试推送失败，请查看系统日志";
+  json += "\"}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+}
+
+// 切换推送网络：0=仅WiFi，1=仅4G数据，2=WiFi优先+4G兜底
+void handlePushNetwork() {
+  if (!checkAuth()) return;
+
+  if (!server.hasArg("mode")) {
+    server.send(400, "application/json", "{\"success\":false,\"message\":\"缺少网络模式\"}");
+    return;
+  }
+
+  int mode = server.arg("mode").toInt();
+  if (mode < PUSH_NET_WIFI || mode > PUSH_NET_WIFI_FALLBACK) {
+    server.send(400, "application/json", "{\"success\":false,\"message\":\"网络模式无效\"}");
+    return;
+  }
+
+  config.pushNetworkMode = (PushNetworkMode)mode;
+  saveConfig();
+
+  String message;
+  if (mode == PUSH_NET_WIFI) {
+    message = "已切换为仅 WiFi 推送";
+  } else if (mode == PUSH_NET_CELLULAR) {
+    message = "已切换为仅 4G 数据推送";
+  } else {
+    message = "已切换为 WiFi 优先，传输失败时使用 4G 数据";
+  }
+
+  String json = "{\"success\":true,\"mode\":" + String(mode) +
+                ",\"message\":\"" + message + "\"}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
 }
 
 // 处理日志查询请求 — 返回环形缓冲区中的日志行
@@ -978,6 +1222,10 @@ void handleModem() {
   static bool busy = false;
   if (busy) {
     server.send(429, "application/json", "{\"success\":false,\"message\":\"模组正忙，请稍后重试\"}");
+    return;
+  }
+  if (modemCommandBusy()) {
+    server.send(429, "application/json", "{\"success\":false,\"message\":\"模组正在执行其他操作，请稍后重试\"}");
     return;
   }
   busy = true;
@@ -1078,42 +1326,288 @@ void handleModem() {
   server.send(200, "application/json", json);
 }
 
-// WiFi 重启
+struct WifiScanEntry {
+  String ssid;
+  int32_t rssi;
+  uint8_t auth;
+  int32_t channel;
+};
+
+static String wifiStatusJson() {
+  bool connected = WiFi.status() == WL_CONNECTED;
+  String currentSsid = connected ? WiFi.SSID() : loadWifiSetting("ssid", WIFI_SSID);
+  String savedSsid = loadWifiSetting("ssid", WIFI_SSID);
+
+  String json = "{";
+  json += "\"success\":true,\"connected\":" + String(connected ? "true" : "false");
+  json += ",\"ssid\":\"" + jsonEscape(currentSsid) + "\"";
+  json += ",\"ip\":\"" + jsonEscape(connected ? WiFi.localIP().toString() : String("")) + "\"";
+  json += ",\"rssi\":" + String(connected ? WiFi.RSSI() : 0);
+  json += ",\"savedSsid\":\"" + jsonEscape(savedSsid) + "\"";
+  json += ",\"savedAuth\":" + String(loadWifiAuth());
+  json += ",\"authText\":\"" + jsonEscape(wifiAuthChoiceText(loadWifiAuth())) + "\"";
+  json += "}";
+  return json;
+}
+
+static String wifiScanJson() {
+  const int MAX_SCAN = 32;
+  WifiScanEntry entries[MAX_SCAN];
+  int count = 0;
+  bool wasConnected = WiFi.status() == WL_CONNECTED;
+
+  int found = WiFi.scanNetworks(false, true);
+  if (found < 0) {
+    WiFi.scanDelete();
+    return "{\"success\":false,\"message\":\"WiFi 扫描失败\"}";
+  }
+
+  for (int i = 0; i < found; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;
+
+    bool merged = false;
+    for (int j = 0; j < count; j++) {
+      if (entries[j].ssid == ssid) {
+        if (WiFi.RSSI(i) > entries[j].rssi) {
+          entries[j].rssi = WiFi.RSSI(i);
+          entries[j].auth = (uint8_t)WiFi.encryptionType(i);
+          entries[j].channel = WiFi.channel(i);
+        }
+        merged = true;
+        break;
+      }
+    }
+    if (!merged && count < MAX_SCAN) {
+      entries[count].ssid = ssid;
+      entries[count].rssi = WiFi.RSSI(i);
+      entries[count].auth = (uint8_t)WiFi.encryptionType(i);
+      entries[count].channel = WiFi.channel(i);
+      count++;
+    }
+  }
+  WiFi.scanDelete();
+
+  // 信号强的排在前面，方便直接选择。
+  for (int i = 1; i < count; i++) {
+    WifiScanEntry key = entries[i];
+    int j = i - 1;
+    while (j >= 0 && entries[j].rssi < key.rssi) {
+      entries[j + 1] = entries[j];
+      j--;
+    }
+    entries[j + 1] = key;
+  }
+
+  if (wasConnected && WiFi.status() != WL_CONNECTED) {
+    WiFi.reconnect();
+  }
+
+  String json = "{\"success\":true,\"networks\":[";
+  for (int i = 0; i < count; i++) {
+    if (i > 0) json += ",";
+    json += "{\"ssid\":\"" + jsonEscape(entries[i].ssid) + "\"";
+    json += ",\"rssi\":" + String(entries[i].rssi);
+    json += ",\"auth\":" + String(entries[i].auth);
+    json += ",\"authText\":\"" + jsonEscape(wifiAuthScanText(entries[i].auth)) + "\"";
+    json += ",\"channel\":" + String(entries[i].channel);
+    json += "}";
+  }
+  json += "]}";
+  return json;
+}
+
+static void connectWifiNetwork(const String& ssid, const String& pass, uint8_t auth) {
+  logCaptureLn(String("正在连接 WiFi: ") + ssid);
+  WiFi.disconnect(true);
+  delay(400);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setScanMethod(WIFI_FAST_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  applyWifiSecurity(auth);
+
+  if (auth == 1 || pass.length() == 0) {
+    WiFi.begin(ssid.c_str());
+  } else {
+    WiFi.begin(ssid.c_str(), pass.c_str());
+  }
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(100);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    logCaptureLn(String("WiFi 连接成功, IP: ") + WiFi.localIP().toString());
+  } else {
+    logCaptureLn(String("WiFi 连接失败，将在后台继续尝试"));
+  }
+}
+
+// WiFi 扫描、保存、连接和状态查询
 void handleWifi() {
   if (!checkAuth()) return;
 
   static bool busy = false;
   if (busy) {
-    server.send(429, "application/json", "{\"success\":false,\"message\":\"WiFi正忙，请稍后重试\"}");
+    server.send(429, "application/json", "{\"success\":false,\"message\":\"WiFi 正忙，请稍后重试\"}");
     return;
   }
   busy = true;
 
   String action = server.arg("action");
-  if (action == "restart") {
-    logCaptureLn(String("网页端请求重启WiFi..."));
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"WiFi 正在重启，请等待约 5 秒后刷新页面\"}");
-    WiFi.disconnect(true);
-    delay(500);
-    WiFi.setSleep(false);
-    WiFi.setAutoReconnect(true);
-    WiFi.setScanMethod(WIFI_FAST_SCAN);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    logCaptureLn(String("正在重新连接WiFi: " + String(WIFI_SSID)));
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-      delay(50);
-      server.handleClient();
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      logCaptureLn(String("WiFi 重连成功, IP: " + WiFi.localIP().toString()));
-    } else {
-      logCaptureLn(String("WiFi 重连失败，将在后台持续尝试"));
-    }
-  } else {
-    server.send(200, "application/json", "{\"success\":false,\"message\":\"未知操作\"}");
+  if (action == "status") {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", wifiStatusJson());
+    busy = false;
+    return;
   }
+
+  if (action == "scan") {
+    String json = wifiScanJson();
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", json);
+    busy = false;
+    return;
+  }
+
+  if (action == "save" || action == "connect" || action == "restart") {
+    String ssid;
+    String pass;
+    uint8_t auth;
+
+    if (action == "restart") {
+      ssid = loadWifiSetting("ssid", WIFI_SSID);
+      pass = loadWifiSetting("pass", WIFI_PASS);
+      auth = loadWifiAuth();
+    } else {
+      ssid = server.arg("ssid");
+      ssid.trim();
+      pass = server.arg("pass");
+      auth = (uint8_t)server.arg("auth").toInt();
+
+      if (ssid.length() == 0) {
+        server.send(200, "application/json", "{\"success\":false,\"message\":\"请选择 WiFi 网络\"}");
+        busy = false;
+        return;
+      }
+      if (auth > 4) auth = 0;
+
+      String savedSsid = loadWifiSetting("ssid", WIFI_SSID);
+      String savedPass = loadWifiSetting("pass", WIFI_PASS);
+      if (auth == 1) {
+        pass = "";
+      } else if (pass.length() == 0 && ssid == savedSsid) {
+        pass = savedPass;
+      }
+      if (auth != 1 && pass.length() == 0) {
+        server.send(200, "application/json", "{\"success\":false,\"message\":\"请输入 WiFi 密码\"}");
+        busy = false;
+        return;
+      }
+      saveWifiConnection(ssid, pass, auth);
+    }
+
+    if (action == "save") {
+      server.send(200, "application/json", "{\"success\":true,\"message\":\"WiFi 连接信息已保存，重启后生效\"}");
+      busy = false;
+      return;
+    }
+
+    // 先响应浏览器，再切换连接；切换后设备 IP 可能变化。
+    String message = action == "restart"
+                         ? "WiFi 正在重新连接，请等待约 5 秒后刷新页面"
+                         : "WiFi 连接信息已保存，正在连接；若 IP 变化，请使用新 IP 打开页面";
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"" + message + "\"}");
+    delay(120);
+    connectWifiNetwork(ssid, pass, auth);
+    busy = false;
+    return;
+  }
+
+  server.send(200, "application/json", "{\"success\":false,\"message\":\"未知操作\"}");
   busy = false;
+}
+
+static String apStatusJson() {
+  bool enabled = loadApEnabled();
+  bool running = (WiFi.getMode() & WIFI_AP) != 0;
+  String ip = running ? WiFi.softAPIP().toString() : String("");
+  int clients = running ? WiFi.softAPgetStationNum() : 0;
+  String defaultSsid = defaultApSsid();
+
+  String json = "{";
+  json += "\"success\":true,\"enabled\":" + String(enabled ? "true" : "false");
+  json += ",\"running\":" + String(running ? "true" : "false");
+  json += ",\"ssid\":\"" + jsonEscape(loadApSsid()) + "\"";
+  json += ",\"defaultSsid\":\"" + jsonEscape(defaultSsid) + "\"";
+  json += ",\"ip\":\"" + jsonEscape(ip) + "\"";
+  json += ",\"clients\":" + String(clients);
+  json += ",\"passwordChanged\":" + String(loadApPasswordChanged() ? "true" : "false");
+  json += ",\"encryption\":\"WPA2-AES\"";
+  json += "}";
+  return json;
+}
+
+// 热点配置：开关、SSID、WPA2 密码；配置保存后立即应用
+void handleAp() {
+  if (!checkAuth()) return;
+
+  String action = server.arg("action");
+  if (action == "status") {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", apStatusJson());
+    return;
+  }
+
+  if (action != "save") {
+    if (action == "reset-prompt") {
+      resetApPrompt();
+      server.send(200, "application/json", "{\"success\":true,\"message\":\"首次登录提示已重置\"}");
+      return;
+    }
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"未知操作\"}");
+    return;
+  }
+
+  bool enabled = server.hasArg("enabled") &&
+                 (server.arg("enabled") == "on" || server.arg("enabled") == "1" ||
+                  server.arg("enabled") == "true");
+  String ssid = server.arg("ssid");
+  ssid.trim();
+  if (ssid.length() == 0) ssid = defaultApSsid();
+  if (ssid.length() > 32) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"热点名称不能超过 32 字节\"}");
+    return;
+  }
+
+  String pass = server.arg("pass");
+  if (pass.length() == 0) pass = loadApPassword();
+  if (pass.length() < 8 || pass.length() > 63) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"热点密码必须为 8-63 位\"}");
+    return;
+  }
+
+  saveApConfig(enabled, ssid, pass);
+  bool passwordChanged = loadApPasswordChanged();
+
+  String json = "{\"success\":true,\"message\":\"热点配置已保存\",";
+  json += "\"enabled\":";
+  json += enabled ? "true" : "false";
+  json += ",\"passwordChanged\":";
+  json += passwordChanged ? "true" : "false";
+  json += "}";
+
+  // 先发送响应，再重启热点；如果当前是通过 AP 访问，连接会按预期断开。
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+  delay(100);
+  if (enabled) {
+    startAccessPoint();
+  } else {
+    stopAccessPoint();
+  }
 }
 
 // 系统控制命令

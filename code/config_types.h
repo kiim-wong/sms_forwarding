@@ -15,11 +15,25 @@ enum PushType {
   PUSH_TYPE_CUSTOM = 7,    // 自定义模板
   PUSH_TYPE_FEISHU = 8,    // 飞书机器人
   PUSH_TYPE_GOTIFY = 9,    // Gotify
-  PUSH_TYPE_TELEGRAM = 10  // Telegram Bot
+  PUSH_TYPE_TELEGRAM = 10, // Telegram Bot
+  PUSH_TYPE_WECOM = 11     // 企业微信机器人（text）
+};
+
+// 推送网络模式
+enum PushNetworkMode : uint8_t {
+  PUSH_NET_WIFI = 0,          // 仅 WiFi
+  PUSH_NET_CELLULAR = 1,      // 仅 4G 数据
+  PUSH_NET_WIFI_FALLBACK = 2  // WiFi 优先，WiFi 失败时使用 4G 数据
 };
 
 // 最大推送通道数
 #define MAX_PUSH_CHANNELS 5
+#define MAX_PUSH_CHANNEL_NAME 40
+
+struct PushChannelResult {
+  char name[MAX_PUSH_CHANNEL_NAME];
+  bool success;
+};
 
 // 推送通道配置（通用设计，支持多种推送方式）
 struct PushChannel {
@@ -34,16 +48,17 @@ struct PushChannel {
 
 // 配置参数结构体
 struct Config {
-  String smtpServer;
-  int smtpPort;
-  String smtpUser;
-  String smtpPass;
-  String smtpSendTo;
   String adminPhone;
   PushChannel pushChannels[MAX_PUSH_CHANNELS];  // 多推送通道
   String webUser;      // Web管理账号
   String webPass;      // Web管理密码
-  String numberBlackList;  // 号码黑名单（换行符分隔）
+  String numberBlackList;        // 号码精确黑名单（换行符分隔）
+  String numberPrefixBlackList;  // 号码前缀黑名单（换行符分隔）
+  String numberSuffixBlackList;  // 号码后缀黑名单（换行符分隔）
+  String contentBlackList;       // 内容关键词黑名单（换行符分隔，任一命中）
+  PushNetworkMode pushNetworkMode;  // 推送网络模式
+  uint8_t operatorMode;          // 0=自动选网, 1=手动选网
+  String operatorCode;           // PLMN（MCC+MNC，例如 46000）
 };
 
 // 默认Web管理账号密码

@@ -4,15 +4,16 @@
 // 保存配置到NVS
 void saveConfig() {
   preferences.begin("sms_config", false);
-  preferences.putString("smtpServer", config.smtpServer);
-  preferences.putInt("smtpPort", config.smtpPort);
-  preferences.putString("smtpUser", config.smtpUser);
-  preferences.putString("smtpPass", config.smtpPass);
-  preferences.putString("smtpSendTo", config.smtpSendTo);
   preferences.putString("adminPhone", config.adminPhone);
   preferences.putString("webUser", config.webUser);
   preferences.putString("webPass", config.webPass);
   preferences.putString("numBlkList", config.numberBlackList);
+  preferences.putString("numBlkPrefix", config.numberPrefixBlackList);
+  preferences.putString("numBlkSuffix", config.numberSuffixBlackList);
+  preferences.putString("contentBlkList", config.contentBlackList);
+  preferences.putUChar("pushNetMode", (uint8_t)config.pushNetworkMode);
+  preferences.putUChar("operatorMode", config.operatorMode);
+  preferences.putString("operatorCode", config.operatorCode);
   
   // 保存推送通道配置
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
@@ -33,15 +34,20 @@ void saveConfig() {
 // 从NVS加载配置
 void loadConfig() {
   preferences.begin("sms_config", true);
-  config.smtpServer = preferences.getString("smtpServer", "");
-  config.smtpPort = preferences.getInt("smtpPort", 465);
-  config.smtpUser = preferences.getString("smtpUser", "");
-  config.smtpPass = preferences.getString("smtpPass", "");
-  config.smtpSendTo = preferences.getString("smtpSendTo", "");
   config.adminPhone = preferences.getString("adminPhone", "");
   config.webUser = preferences.getString("webUser", DEFAULT_WEB_USER);
   config.webPass = preferences.getString("webPass", DEFAULT_WEB_PASS);
   config.numberBlackList = preferences.getString("numBlkList", "");
+  config.numberPrefixBlackList = preferences.getString("numBlkPrefix", "");
+  config.numberSuffixBlackList = preferences.getString("numBlkSuffix", "");
+  config.contentBlackList = preferences.getString("contentBlkList", "");
+  uint8_t pushNetMode = preferences.getUChar("pushNetMode", PUSH_NET_WIFI);
+  config.pushNetworkMode = pushNetMode <= PUSH_NET_WIFI_FALLBACK
+                               ? (PushNetworkMode)pushNetMode
+                               : PUSH_NET_WIFI;
+  config.operatorMode = preferences.getUChar("operatorMode", 0);
+  config.operatorCode = preferences.getString("operatorCode", "");
+  if (config.operatorMode > 1) config.operatorMode = 0;
   
   // 加载推送通道配置
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
@@ -53,16 +59,6 @@ void loadConfig() {
     config.pushChannels[i].key1 = preferences.getString((prefix + "k1").c_str(), "");
     config.pushChannels[i].key2 = preferences.getString((prefix + "k2").c_str(), "");
     config.pushChannels[i].customBody = preferences.getString((prefix + "body").c_str(), "");
-  }
-  
-  // 兼容旧配置：如果有旧的httpUrl配置，迁移到第一个通道
-  String oldHttpUrl = preferences.getString("httpUrl", "");
-  if (oldHttpUrl.length() > 0 && !config.pushChannels[0].enabled) {
-    config.pushChannels[0].enabled = true;
-    config.pushChannels[0].url = oldHttpUrl;
-    config.pushChannels[0].type = preferences.getUChar("barkMode", 0) != 0 ? PUSH_TYPE_BARK : PUSH_TYPE_POST_JSON;
-    config.pushChannels[0].name = "迁移通道";
-    logCaptureLn(String("已迁移旧HTTP配置到推送通道1"));
   }
   
   preferences.end();
@@ -80,6 +76,7 @@ bool isPushChannelValid(const PushChannel& ch) {
     case PUSH_TYPE_DINGTALK:
     case PUSH_TYPE_FEISHU:
     case PUSH_TYPE_CUSTOM:
+    case PUSH_TYPE_WECOM:
       return ch.url.length() > 0;
     case PUSH_TYPE_PUSHPLUS:
     case PUSH_TYPE_SERVERCHAN:
@@ -93,13 +90,8 @@ bool isPushChannelValid(const PushChannel& ch) {
   }
 }
 
-// 检查配置是否有效（至少配置了邮件或任一推送通道）
+// 检查配置是否有效（至少配置了一个推送通道）
 bool isConfigValid() {
-  bool emailValid = config.smtpServer.length() > 0 && 
-                    config.smtpUser.length() > 0 && 
-                    config.smtpPass.length() > 0 && 
-                    config.smtpSendTo.length() > 0;
-  
   bool pushValid = false;
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
     if (isPushChannelValid(config.pushChannels[i])) {
@@ -108,7 +100,7 @@ bool isConfigValid() {
     }
   }
   
-  return emailValid || pushValid;
+  return pushValid;
 }
 
 // 获取当前设备URL

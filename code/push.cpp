@@ -2,70 +2,11 @@
 #include "web_handlers.h"
 #include "config.h"
 #include "web_handlers.h"
+#include "modem_http.h"
 #include <HTTPClient.h>
 #include <mbedtls/md.h>
 #include <base64.h>
 #include <sys/time.h>
-
-// 发送邮件通知函数（带重试）
-void sendEmailNotification(const char* subject, const char* body) {
-  if (config.smtpServer.length() == 0 || config.smtpUser.length() == 0 || 
-      config.smtpPass.length() == 0 || config.smtpSendTo.length() == 0) {
-    logCaptureLn(String("邮件配置不完整，跳过发送"));
-    return;
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    logCaptureLn(String("WiFi未连接，跳过邮件发送"));
-    return;
-  }
-
-  auto statusCallback = [](SMTPStatus status) {
-    logCaptureLn(String(status.text));
-  };
-
-  const int MAX_ATTEMPTS = 3; // 总尝试次数（含首次）
-  for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (attempt > 1) {
-      delay(1000 * (attempt - 1)); // 退避：第2次前等1秒，第3次前等2秒
-      logCaptureF("[邮件] 重试 (%d/%d)...\n", attempt, MAX_ATTEMPTS);
-    }
-
-    // 清理上一次尝试的残留连接状态，确保每次从干净状态开始
-    smtp.stop();
-
-    if (!smtp.connect(config.smtpServer.c_str(), config.smtpPort, statusCallback)) {
-      logCaptureLn(String("邮件服务器连接失败"));
-      continue;
-    }
-
-    if (!smtp.authenticate(config.smtpUser.c_str(), config.smtpPass.c_str(), readymail_auth_password)) {
-      // 认证失败属配置错误，重试无意义
-      logCaptureLn(String("邮件认证失败（请检查账号与SMTP授权码），停止重试"));
-      smtp.stop();
-      return;
-    }
-
-    SMTPMessage msg;
-    String from = "sms notify <"; from += config.smtpUser; from += ">";
-    msg.headers.add(rfc822_from, from.c_str());
-    String to = "your_email <"; to += config.smtpSendTo; to += ">";
-    msg.headers.add(rfc822_to, to.c_str());
-    msg.headers.add(rfc822_subject, subject);
-    msg.text.body(body);
-    msg.timestamp = time(nullptr);
-
-    if (smtp.send(msg)) {
-      logCaptureF("[邮件] 发送成功（第 %d/%d 次尝试）\n", attempt, MAX_ATTEMPTS);
-      smtp.stop();
-      return;
-    }
-    logCaptureLn(String("邮件发送失败"));
-  }
-
-  logCaptureLn(String("邮件多次重试后仍失败，本次通知已丢弃"));
-  smtp.stop();
-}
 
 // URL编码辅助函数
 String urlEncode(const String& str) {
@@ -123,6 +64,7 @@ int64_t getUtcMillis() {
 // JSON转义函数
 String jsonEscape(const String& str) {
   String result = "";
+  result.reserve(str.length() + 16);
   for (unsigned int i = 0; i < str.length(); i++) {
     char c = str.charAt(i);
     if (c == '"') result += "\\\"";
@@ -135,6 +77,42 @@ String jsonEscape(const String& str) {
   return result;
 }
 
+// 将 pdulib 的 YYMMDDHHMMSS(+时区) 时间戳转换为人类可读格式。
+// 例：26103118103632 -> 2026-10-31 18:10:36
+String formatSmsTimestamp(const String& rawTimestamp) {
+  String raw = rawTimestamp;
+  raw.trim();
+  if (raw.length() == 0) return "时间未知";
+
+  // 已经是格式化时间（例如推送测试使用的 currentLocalTimestamp()）则直接返回。
+  if (raw.indexOf('-') >= 0 || raw.indexOf(':') >= 0) return raw;
+
+  String digits;
+  digits.reserve(raw.length());
+  for (unsigned int i = 0; i < raw.length(); i++) {
+    char c = raw.charAt(i);
+    if (c >= '0' && c <= '9') digits += c;
+  }
+  if (digits.length() < 12) return raw;
+
+  int year = 2000 + digits.substring(0, 2).toInt();
+  int month = digits.substring(2, 4).toInt();
+  int day = digits.substring(4, 6).toInt();
+  int hour = digits.substring(6, 8).toInt();
+  int minute = digits.substring(8, 10).toInt();
+  int second = digits.substring(10, 12).toInt();
+
+  if (month < 1 || month > 12 || day < 1 || day > 31 ||
+      hour > 23 || minute > 59 || second > 59) {
+    return raw;
+  }
+
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+           year, month, day, hour, minute, second);
+  return String(buf);
+}
+
 // 判断业务响应体是否表示成功
 // 部分平台无论成败 HTTP 都返回 200，错误信息在响应体中，需要额外校验
 static bool isBodySuccess(const PushChannel& channel, const String& resp) {
@@ -144,53 +122,206 @@ static bool isBodySuccess(const PushChannel& channel, const String& resp) {
     case PUSH_TYPE_PUSHPLUS:   return resp.indexOf("\"code\":200") >= 0;
     case PUSH_TYPE_SERVERCHAN: return resp.indexOf("\"code\":0") >= 0;
     case PUSH_TYPE_TELEGRAM:   return resp.indexOf("\"ok\":true") >= 0;
+    case PUSH_TYPE_WECOM:      return resp.indexOf("\"errcode\":0") >= 0;
     default:                   return true; // 其余平台以 HTTP 状态码为准
   }
 }
 
-// 带重试地执行单个通道的 HTTP 请求（最多 3 次，失败后退避重试）
+struct PushRuntime {
+  PushNetworkMode mode;
+  bool wifiUsable = false;
+  bool cellularReady = false;
+  bool cellularActivatedByUs = false;
+  bool networkAvailable = false;
+
+  explicit PushRuntime(PushNetworkMode selectedMode) : mode(selectedMode) {}
+  ~PushRuntime() {
+    if (cellularReady) modemDataEnd(cellularActivatedByUs);
+  }
+};
+
+struct HttpAttemptResult {
+  bool success = false;
+  bool gotHttpResponse = false;
+  bool transportFailure = false;
+  bool fallbackEligible = false;
+  bool retryable = true;
+  int httpCode = 0;
+  String response;
+  String error;
+};
+
+static bool ensureCellular(PushRuntime& runtime) {
+  if (runtime.cellularReady) return true;
+
+  bool activatedByUs = false;
+  if (!modemDataBegin(activatedByUs)) {
+    runtime.cellularReady = false;
+    return false;
+  }
+  runtime.cellularReady = true;
+  runtime.cellularActivatedByUs = activatedByUs;
+  runtime.networkAvailable = true;
+  return true;
+}
+
+static bool preparePushRoute(PushRuntime& runtime) {
+  if (runtime.mode == PUSH_NET_WIFI) {
+    runtime.wifiUsable = WiFi.status() == WL_CONNECTED;
+    runtime.networkAvailable = runtime.wifiUsable;
+    if (!runtime.wifiUsable) logCaptureLn(String("[NET] WiFi 未连接，WiFi 推送不可用"));
+    return runtime.wifiUsable;
+  }
+
+  if (runtime.mode == PUSH_NET_CELLULAR) {
+    if (!ensureCellular(runtime)) {
+      logCaptureLn(String("[NET] 4G 数据不可用，推送已取消"));
+      return false;
+    }
+    return true;
+  }
+
+  runtime.wifiUsable = WiFi.status() == WL_CONNECTED;
+  if (runtime.wifiUsable) {
+    runtime.networkAvailable = true;
+    logCaptureLn(String("[NET] 推送网络：WiFi 优先"));
+    return true;
+  }
+
+  logCaptureLn(String("[NET] WiFi 未连接，推送切换到 4G 数据"));
+  return ensureCellular(runtime);
+}
+
+static HttpAttemptResult executeWifiRequest(const PushChannel& channel, const String& url,
+                                            bool isGet, const String& contentType,
+                                            const String& body) {
+  HttpAttemptResult result;
+  HTTPClient http;
+  http.setTimeout(8000);
+  if (!http.begin(url)) {
+    result.transportFailure = true;
+    result.fallbackEligible = true;
+    result.error = "HTTP 初始化失败";
+    return result;
+  }
+
+  if (!isGet) http.addHeader("Content-Type", contentType);
+  int httpCode = isGet ? http.GET() : http.POST(body);
+  result.httpCode = httpCode;
+
+  if (httpCode <= 0) {
+    result.transportFailure = true;
+    // 读超时不能兜底：请求可能已经送达服务器，再发一次会造成重复通知。
+    result.fallbackEligible = httpCode == HTTPC_ERROR_CONNECTION_REFUSED ||
+                              httpCode == HTTPC_ERROR_SEND_HEADER_FAILED ||
+                              httpCode == HTTPC_ERROR_NOT_CONNECTED ||
+                              httpCode == HTTPC_ERROR_NO_STREAM ||
+                              httpCode == HTTPC_ERROR_NO_HTTP_SERVER;
+    result.retryable = httpCode != HTTPC_ERROR_READ_TIMEOUT;
+    result.error = http.errorToString(httpCode);
+    http.end();
+    return result;
+  }
+
+  result.gotHttpResponse = true;
+  result.response = http.getString();
+  bool httpOk = httpCode >= 200 && httpCode < 300;
+  result.success = httpOk && isBodySuccess(channel, result.response);
+  http.end();
+  return result;
+}
+
+static HttpAttemptResult executeCellularRequest(const PushChannel& channel, const String& url,
+                                                bool isGet, const String& contentType,
+                                                const String& body) {
+  HttpAttemptResult result;
+  ModemHttpResponse modemResponse;
+  if (!modemHttpRequest(url, isGet, contentType, body, modemResponse)) {
+    result.transportFailure = true;
+    result.retryable = !modemResponse.requestSent;
+    result.error = modemResponse.error;
+    return result;
+  }
+
+  result.gotHttpResponse = true;
+  result.httpCode = modemResponse.statusCode;
+  result.response = modemResponse.body;
+  bool httpOk = result.httpCode >= 200 && result.httpCode < 300;
+  result.success = httpOk && isBodySuccess(channel, result.response);
+  return result;
+}
+
+// 带重试地执行单个通道的 HTTP 请求。WiFi 优先模式下，只有传输层失败
+// 才会切换到 4G；收到 4xx/5xx 或业务错误不会重发，避免重复通知。
 static bool executeChannelRequest(const PushChannel& channel, const String& url,
                                   bool isGet, const String& contentType, const String& body,
-                                  const String& channelName) {
-  const int MAX_ATTEMPTS = 3;
+                                  const String& channelName, int maxAttempts,
+                                  PushRuntime& runtime) {
+  const int MAX_ATTEMPTS = maxAttempts > 0 ? maxAttempts : 1;
   for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (attempt > 1) {
-      delay(500 * (attempt - 1)); // 退避：第2次前等0.5秒，第3次前等1秒
+      delay(500 * (attempt - 1));
       logCaptureF("[%s] 重试 (%d/%d)...\n", channelName.c_str(), attempt, MAX_ATTEMPTS);
     }
 
-    HTTPClient http;
-    http.begin(url);
-    if (!isGet) http.addHeader("Content-Type", contentType);
-    int httpCode = isGet ? http.GET() : http.POST(body);
+    bool useCellular = runtime.mode == PUSH_NET_CELLULAR;
+    if (runtime.mode == PUSH_NET_WIFI_FALLBACK) {
+      if (runtime.wifiUsable && WiFi.status() != WL_CONNECTED) {
+        logCaptureLn(String("[NET] WiFi 已断开，切换到 4G 数据"));
+        runtime.wifiUsable = false;
+      }
+      useCellular = !runtime.wifiUsable;
+    }
 
-    if (httpCode <= 0) {
-      // 连接失败/超时等传输层错误，可重试
-      logCaptureF("[%s] HTTP请求失败: %s\n", channelName.c_str(), http.errorToString(httpCode).c_str());
-    } else {
-      logCaptureF("[%s] 响应码: %d\n", channelName.c_str(), httpCode);
-      bool httpOk = (httpCode >= 200 && httpCode < 300);
-      String resp = "";
-      if (httpOk) resp = http.getString();
+    if (runtime.mode == PUSH_NET_WIFI && WiFi.status() != WL_CONNECTED) {
+      runtime.networkAvailable = false;
+      logCaptureLn(String("[NET] WiFi 未连接，取消推送"));
+      return false;
+    }
 
-      if (httpOk && isBodySuccess(channel, resp)) {
-        logCaptureF("[%s] 推送成功（第 %d/%d 次尝试）\n", channelName.c_str(), attempt, MAX_ATTEMPTS);
-        if (resp.length() > 0) logCaptureLn(String("响应: " + resp));
-        http.end();
+    HttpAttemptResult result;
+    if (!useCellular) {
+      logCaptureF("[%s] 通过 WiFi 推送...\n", channelName.c_str());
+      result = executeWifiRequest(channel, url, isGet, contentType, body);
+      if (result.fallbackEligible && runtime.mode == PUSH_NET_WIFI_FALLBACK) {
+        logCaptureF("[%s] WiFi 传输失败（%s），切换 4G 数据\n",
+                    channelName.c_str(), result.error.c_str());
+        runtime.wifiUsable = false;
+        useCellular = true;
+      }
+    }
+
+    if (useCellular) {
+      if (!ensureCellular(runtime)) {
+        logCaptureLn(String("[NET] 4G 数据不可用"));
+      } else {
+        logCaptureF("[%s] 通过 4G 数据推送...\n", channelName.c_str());
+        result = executeCellularRequest(channel, url, isGet, contentType, body);
+      }
+    }
+
+    if (result.transportFailure) {
+      logCaptureF("[%s] HTTP请求失败: %s\n", channelName.c_str(), result.error.c_str());
+      if (!result.retryable) {
+        logCaptureLn(String("[" + channelName + "] 请求可能已送达，跳过重试以防重复通知"));
+        return false;
+      }
+    } else if (result.gotHttpResponse) {
+      logCaptureF("[%s] 响应码: %d\n", channelName.c_str(), result.httpCode);
+      if (result.response.length() > 0) logCaptureLn(String("响应: " + result.response));
+      if (result.success) {
+        logCaptureF("[%s] 推送成功（第 %d/%d 次尝试）\n",
+                    channelName.c_str(), attempt, MAX_ATTEMPTS);
         return true;
       }
-
-      if (resp.length() > 0) logCaptureLn(String("响应: " + resp));
-
-      // 明确的 4xx 客户端错误（除 429 限流）多为配置问题，重试无意义
-      if (httpCode >= 400 && httpCode < 500 && httpCode != 429) {
-        logCaptureF("[%s] 客户端错误 %d，跳过重试\n", channelName.c_str(), httpCode);
-        http.end();
+      if (result.httpCode >= 400 && result.httpCode < 500 && result.httpCode != 429) {
+        logCaptureF("[%s] 客户端错误 %d，跳过重试\n", channelName.c_str(), result.httpCode);
         return false;
       }
       logCaptureLn(String("[" + channelName + "] 本次推送未确认成功"));
+    } else {
+      logCaptureLn(String("[" + channelName + "] 本次推送没有收到 HTTP 响应"));
     }
-    http.end();
   }
 
   logCaptureLn(String("[" + channelName + "] 多次重试后仍失败"));
@@ -198,14 +329,16 @@ static bool executeChannelRequest(const PushChannel& channel, const String& url,
 }
 
 // 发送单个推送通道（统一构建请求参数，由 executeChannelRequest 执行并自动重试）
-void sendToChannel(const PushChannel& channel, const char* sender, const char* message, const char* timestamp) {
-  if (!channel.enabled) return;
+static bool sendToChannelOnRuntime(const PushChannel& channel, const char* sender,
+                                   const char* message, const char* timestamp,
+                                   bool testMode, PushRuntime& runtime) {
+  if (!channel.enabled) return false;
 
   // 对于某些推送方式，URL可以为空（使用默认URL）
   bool needUrl = (channel.type == PUSH_TYPE_POST_JSON || channel.type == PUSH_TYPE_BARK ||
                   channel.type == PUSH_TYPE_GET || channel.type == PUSH_TYPE_DINGTALK ||
-                  channel.type == PUSH_TYPE_CUSTOM);
-  if (needUrl && channel.url.length() == 0) return;
+                  channel.type == PUSH_TYPE_CUSTOM || channel.type == PUSH_TYPE_WECOM);
+  if (needUrl && channel.url.length() == 0) return false;
 
   String channelName = channel.name.length() > 0 ? channel.name : ("通道" + String(channel.type));
   logCaptureLn(String("发送到推送通道: " + channelName));
@@ -279,7 +412,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       }
       reqUrl = webhookUrl;
       reqBody = "{\"msgtype\":\"text\",\"text\":{\"content\":\"";
-      reqBody += "📱短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
+      reqBody += "[SMS] 短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
       reqBody += "\"}}";
       logCaptureLn(String("钉钉: " + reqBody));
       break;
@@ -322,7 +455,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       // 自定义模板
       if (channel.customBody.length() == 0) {
         logCaptureLn(String("自定义模板为空，跳过"));
-        return;
+        return false;
       }
       reqUrl = channel.url;
       reqBody = channel.customBody;
@@ -358,7 +491,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       // 飞书消息体
       jsonData += "\"msg_type\":\"text\",";
       jsonData += "\"content\":{\"text\":\"";
-      jsonData += "📱短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
+      jsonData += "[SMS] 短信通知\\n发送者: " + senderEscaped + "\\n内容: " + messageEscaped + "\\n时间: " + timestampEscaped;
       jsonData += "\"}}";
 
       reqUrl = channel.url;
@@ -391,7 +524,7 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
 
       reqUrl = tgBaseUrl + "/bot" + channel.key2 + "/sendMessage";
 
-      String text = "📱短信通知\n发送者: " + senderEscaped + "\n内容: " + messageEscaped + "\n时间: " + timestampEscaped;
+      String text = "[SMS] 短信通知\n发送者: " + senderEscaped + "\n内容: " + messageEscaped + "\n时间: " + timestampEscaped;
       reqBody = "{";
       reqBody += "\"chat_id\":\"" + channel.key1 + "\",";
       reqBody += "\"text\":\"" + text + "\"";
@@ -401,40 +534,78 @@ void sendToChannel(const PushChannel& channel, const char* sender, const char* m
       break;
     }
 
+    case PUSH_TYPE_WECOM: {
+      // 企业微信群机器人：固定 text 消息格式
+      reqUrl = channel.url;
+      reqBody = "{\"msgtype\":\"text\",\"text\":{\"content\":\"";
+      reqBody += "[SMS] 短信通知\\n发送者: " + senderEscaped +
+                 "\\n内容: " + messageEscaped +
+                 "\\n时间: " + timestampEscaped;
+      reqBody += "\"}}";
+      logCaptureLn(String("企业微信: " + reqBody));
+      break;
+    }
+
     default:
       logCaptureLn(String("未知推送类型"));
-      return;
+      return false;
   }
 
-  executeChannelRequest(channel, reqUrl, useGet, reqContentType, reqBody, channelName);
+  return executeChannelRequest(channel, reqUrl, useGet, reqContentType, reqBody,
+                               channelName, testMode ? 1 : 2, runtime);
+}
+
+// 单通道测试和外部调用入口：每次调用创建独立的网络路由上下文。
+bool sendToChannel(const PushChannel& channel, const char* sender, const char* message,
+                   const char* timestamp, bool testMode) {
+  PushRuntime runtime(config.pushNetworkMode);
+  if (!preparePushRoute(runtime)) return false;
+  return sendToChannelOnRuntime(channel, sender, message, timestamp, testMode, runtime);
 }
 
 // 发送短信到所有启用的推送通道
-void sendSMSToServer(const char* sender, const char* message, const char* timestamp) {
-  if (WiFi.status() != WL_CONNECTED) {
-    logCaptureLn(String("WiFi未连接，跳过推送"));
-    return;
-  }
-  
-  bool hasEnabledChannel = false;
+PushSummary sendSMSToServer(const char* sender, const char* message, const char* timestamp) {
+  PushSummary summary = {};
+
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
     if (isPushChannelValid(config.pushChannels[i])) {
-      hasEnabledChannel = true;
+      summary.hasEnabledChannel = true;
       break;
     }
   }
-  
-  if (!hasEnabledChannel) {
+
+  if (!summary.hasEnabledChannel) {
     logCaptureLn(String("没有启用的推送通道"));
-    return;
+    return summary;
   }
-  
+
+  PushRuntime runtime(config.pushNetworkMode);
+  if (!preparePushRoute(runtime)) {
+    summary.networkAvailable = false;
+    return summary;
+  }
+  summary.networkAvailable = true;
+
+  String readableTimestamp = formatSmsTimestamp(String(timestamp));
   logCaptureLn(String("\n=== 开始多通道推送 ==="));
   for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
     if (isPushChannelValid(config.pushChannels[i])) {
-      sendToChannel(config.pushChannels[i], sender, message, timestamp);
+      PushChannelResult& result = summary.channels[summary.channelCount];
+      String channelName = config.pushChannels[i].name.length() > 0
+                               ? config.pushChannels[i].name
+                               : ("通道" + String(i + 1));
+      snprintf(result.name, sizeof(result.name), "%s", channelName.c_str());
+      result.success = sendToChannelOnRuntime(config.pushChannels[i], sender, message,
+                                              readableTimestamp.c_str(), false, runtime);
+      summary.channelCount++;
+      summary.attempted++;
+      if (result.success) summary.succeeded++;
       delay(100); // 短暂延迟避免请求过快
     }
   }
+  // 只要实际尝试过通道，就说明开始时存在可用路由；后续个别请求失败
+  // 应记录为“转发失败/部分成功”，不能误判成“无可用网络”。
+  summary.networkAvailable = summary.attempted > 0 || runtime.networkAvailable;
   logCaptureLn(String("=== 多通道推送完成 ===\n"));
+  return summary;
 }

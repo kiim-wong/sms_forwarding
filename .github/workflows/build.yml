@@ -28,7 +28,6 @@ jobs:
     - name: Install dependencies
       run: |
         arduino-cli lib install "pdulib"
-        arduino-cli lib install "ReadyMail"
     
     - name: Compile firmware
       run: |

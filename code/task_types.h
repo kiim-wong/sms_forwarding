@@ -36,8 +36,7 @@ struct ModemResult {
 };
 
 enum NotifyJobType {
-  NOTIFY_JOB_SMS_PUSH = 0,
-  NOTIFY_JOB_EMAIL
+  NOTIFY_JOB_SMS_PUSH = 0
 };
 
 struct NotifyJob {

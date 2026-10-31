@@ -3,13 +3,10 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <Preferences.h>
 #include <pdulib.h>
-#define ENABLE_SMTP
 #define ENABLE_DEBUG
-#include <ReadyMail.h>
 #include "config_types.h"
 
 // 串口映射
@@ -22,19 +19,18 @@
 #define LED_BUILTIN 8
 #endif
 
-#define SERIAL_BUFFER_SIZE 500
+#define SERIAL_BUFFER_SIZE 4096
 #define MAX_PDU_LENGTH 300
 
 // 全局变量声明
 extern Config config;
 extern Preferences preferences;
 extern PDU pdu;
-extern WiFiClientSecure ssl_client;
-extern SMTPClient smtp;
 extern WebServer server;
 extern bool configValid;
 extern bool timeSynced;
 extern bool modemReady;
+extern bool webLongOperationActive;
 extern unsigned long lastPrintTime;
 extern ConcatSms concatBuffer[MAX_CONCAT_MESSAGES];
 

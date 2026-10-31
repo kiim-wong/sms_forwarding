@@ -19,6 +19,9 @@ bool checkAuth();
 void handleRoot();
 void handleToolsPage();
 void handleSave();
+void handleHistory();
+void handleTestPush();
+void handlePushNetwork();
 void handleQuery();
 void handleFlightMode();
 void handleATCommand();
@@ -27,6 +30,7 @@ void handlePing();
 void handleLog();
 void handleModem();
 void handleWifi();
+void handleAp();
 void handleSystem();
 
 #endif

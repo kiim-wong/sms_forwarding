@@ -11,9 +11,13 @@ void checkConcatTimeout();
 String readSerialLine(HardwareSerial& port);
 bool isHexString(const String& str);
 bool isInNumberBlackList(const char* sender);
+bool isInContentBlackList(const char* text);
 bool isAdmin(const char* sender);
 void processAdminCommand(const char* sender, const char* text);
 void processSmsContent(const char* sender, const char* text, const char* timestamp);
+bool handleSmsUrcLine(const String& line);
+void processPendingSms();
+void pollStoredSms();
 void checkSerial1URC();
 
 #endif
